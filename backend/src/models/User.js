@@ -23,7 +23,8 @@ class User {
     `;
 
     const values = [username, email, passwordHash, apiKey, jwtSecret];
-    return await db.getOne(query, values);
+    const result = await db.query(query, values);
+    return result.rows[0];
   }
 
   static async findById(id) {
@@ -32,7 +33,8 @@ class User {
       FROM users
       WHERE id = $1 AND is_active = true
     `;
-    return await db.getOne(query, [id]);
+    const result = await db.query(query, [id]);
+    return result.rows[0];
   }
 
   static async findByEmail(email) {
@@ -41,7 +43,8 @@ class User {
       FROM users
       WHERE email = $1 AND is_active = true
     `;
-    return await db.getOne(query, [email]);
+    const result = await db.query(query, [email]);
+    return result.rows[0];
   }
 
   static async findByApiKey(apiKey) {
@@ -50,7 +53,8 @@ class User {
       FROM users
       WHERE api_key = $1 AND is_active = true
     `;
-    return await db.getOne(query, [apiKey]);
+    const result = await db.query(query, [apiKey]);
+    return result.rows[0];
   }
 
   static async findByUsername(username) {
@@ -59,7 +63,8 @@ class User {
       FROM users
       WHERE username = $1 AND is_active = true
     `;
-    return await db.getOne(query, [username]);
+    const result = await db.query(query, [username]);
+    return result.rows[0];
   }
 
   static async update(id, userData) {
@@ -88,7 +93,8 @@ class User {
     `;
 
     values.push(id);
-    return await db.getOne(query, values);
+    const result = await db.query(query, values);
+    return result.rows[0];
   }
 
   static async updatePassword(id, newPassword) {
@@ -102,7 +108,8 @@ class User {
       RETURNING id, username, email, api_key, jwt_secret, is_active, created_at, updated_at
     `;
 
-    return await db.getOne(query, [passwordHash, id]);
+    const result = await db.query(query, [passwordHash, id]);
+    return result.rows[0];
   }
 
   static async regenerateApiKey(id) {
@@ -115,7 +122,8 @@ class User {
       RETURNING id, username, email, api_key, jwt_secret, is_active, created_at, updated_at
     `;
 
-    return await db.getOne(query, [newApiKey, id]);
+    const result = await db.query(query, [newApiKey, id]);
+    return result.rows[0];
   }
 
   static async regenerateJwtSecret(id) {
@@ -128,7 +136,8 @@ class User {
       RETURNING id, username, email, api_key, jwt_secret, is_active, created_at, updated_at
     `;
 
-    return await db.getOne(query, [newJwtSecret, id]);
+    const result = await db.query(query, [newJwtSecret, id]);
+    return result.rows[0];
   }
 
   static async deactivate(id) {
@@ -139,7 +148,8 @@ class User {
       RETURNING id, username, email, api_key, is_active, created_at, updated_at
     `;
 
-    return await db.getOne(query, [id]);
+    const result = await db.query(query, [id]);
+    return result.rows[0];
   }
 
   static async activate(id) {
@@ -150,7 +160,8 @@ class User {
       RETURNING id, username, email, api_key, is_active, created_at, updated_at
     `;
 
-    return await db.getOne(query, [id]);
+    const result = await db.query(query, [id]);
+    return result.rows[0];
   }
 
   static async validatePassword(plainPassword, hashedPassword) {
@@ -178,13 +189,13 @@ class User {
     values.push(limit, offset);
 
     const [users, countResult] = await Promise.all([
-      db.getMany(query, values),
-      db.getOne(countQuery, countValues)
+      db.query(query, values),
+      db.query(countQuery, countValues)
     ]);
 
     return {
-      users,
-      total: parseInt(countResult.count),
+      users: users.rows,
+      total: parseInt(countResult.rows[0].total),
       limit,
       offset
     };
@@ -192,15 +203,15 @@ class User {
 
   static async getStats(id) {
     const queries = await Promise.all([
-      db.getOne('SELECT COUNT(*) as phone_count FROM phone_numbers WHERE user_id = $1', [id]),
-      db.getOne('SELECT COUNT(*) as message_count FROM messages m JOIN phone_numbers p ON m.phone_number_id = p.id WHERE p.user_id = $1', [id]),
-      db.getOne('SELECT COUNT(*) as connected_phones FROM phone_numbers WHERE user_id = $1 AND is_connected = true', [id])
+      db.query('SELECT COUNT(*) as phone_count FROM phone_numbers WHERE user_id = $1', [id]),
+      db.query('SELECT COUNT(*) as message_count FROM messages m JOIN phone_numbers p ON m.phone_number_id = p.id WHERE p.user_id = $1', [id]),
+      db.query('SELECT COUNT(*) as connected_phones FROM phone_numbers WHERE user_id = $1 AND is_connected = true', [id])
     ]);
 
     return {
-      phoneNumbers: parseInt(queries[0].phone_count),
-      totalMessages: parseInt(queries[1].message_count),
-      connectedPhones: parseInt(queries[2].connected_phones)
+      phoneCount: parseInt(queries[0].rows[0].phone_count),
+      messageCount: parseInt(queries[1].rows[0].message_count),
+      connectedPhones: parseInt(queries[2].rows[0].connected_phones)
     };
   }
 }

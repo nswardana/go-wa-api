@@ -292,7 +292,7 @@ class WebhookService extends EventEmitter {
       const testPayload = {
         event: 'webhook.test',
         data: {
-          message: 'This is a test webhook from Evolution API',
+          message: 'This is a test webhook from ChatFlow',
           timestamp: new Date().toISOString(),
           phone: {
             id: phone.id,

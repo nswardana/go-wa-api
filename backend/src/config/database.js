@@ -3,11 +3,12 @@ const Redis = require('redis');
 const logger = require('../utils/logger');
 
 // PostgreSQL configuration
+const isDevelopment = process.env.NODE_ENV === 'development';
 const pool = new Pool({
-  host: 'postgres', // Use Docker container name
-  port: 5432,
-  database: process.env.DB_NAME || 'evolution_api',
-  user: process.env.DB_USER || 'evolution_user',
+  host: isDevelopment ? 'localhost' : process.env.DB_HOST || 'localhost', // Local dev vs Docker
+  port: process.env.DB_PORT || 5432,
+  database: process.env.DB_NAME || 'chatflow_api',
+  user: process.env.DB_USER || 'chatflow_user',
   password: process.env.DB_PASSWORD || 'Bismillah313!',
   max: 20, // maximum number of clients in the pool
   idleTimeoutMillis: 30000, // how long a client is allowed to remain idle before being closed
@@ -26,149 +27,117 @@ pool.on('error', (err) => {
 // Redis configuration
 const redisClient = Redis.createClient({
   socket: {
-    host: 'redis', // Use Docker container name
-    port: 6379,
+    host: isDevelopment ? 'localhost' : process.env.REDIS_HOST || 'localhost', // Local dev vs Docker
+    port: process.env.REDIS_PORT || 6379,
     family: 4 // Force IPv4
   },
-  password: process.env.REDIS_PASSWORD || undefined,
-  retry_delay_on_failover: 100,
-  enable_offline_queue: false,
+  database: 0
 });
 
 redisClient.on('connect', () => {
-  logger.info('Connected to Redis server');
+  logger.info('Connected to Redis');
 });
 
 redisClient.on('error', (err) => {
   logger.error('Redis connection error:', err);
 });
 
-redisClient.on('ready', () => {
-  logger.info('Redis client ready');
+// Connect to Redis
+redisClient.connect().catch(err => {
+  logger.error('Failed to connect to Redis:', err);
 });
-
-// Initialize Redis connection
-try {
-  redisClient.connect().catch(err => {
-    logger.error('Failed to connect to Redis:', err);
-  });
-} catch (error) {
-  logger.error('Redis initialization error:', error);
-}
 
 // Database helper functions
 const db = {
-  // Query function
+  // Execute query
   query: async (text, params) => {
     const start = Date.now();
     try {
-      const result = await pool.query(text, params);
+      const res = await pool.query(text, params);
       const duration = Date.now() - start;
-      logger.debug('Executed query', { text, duration, rows: result.rowCount });
-      return result;
+      logger.debug('Executed query', { text, duration, rows: res.rowCount });
+      return res;
     } catch (error) {
-      logger.error('Database query error:', { text, error: error.message });
+      logger.error('Database query error:', error);
       throw error;
-    }
-  },
-
-  // Transaction function
-  transaction: async (callback) => {
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      const result = await callback(client);
-      await client.query('COMMIT');
-      return result;
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
     }
   },
 
   // Get single row
   getOne: async (text, params) => {
-    const result = await db.query(text, params);
-    return result.rows[0] || null;
+    try {
+      const res = await pool.query(text, params);
+      return res.rows[0] || null;
+    } catch (error) {
+      logger.error('Database getOne error:', error);
+      throw error;
+    }
   },
 
   // Get multiple rows
+  getAll: async (text, params) => {
+    try {
+      const res = await pool.query(text, params);
+      return res.rows;
+    } catch (error) {
+      logger.error('Database getAll error:', error);
+      throw error;
+    }
+  },
+
+  // Get multiple rows (alias for getAll)
   getMany: async (text, params) => {
-    const result = await db.query(text, params);
-    return result.rows;
-  },
-
-  // Insert and return
-  insert: async (table, data) => {
-    const keys = Object.keys(data);
-    const values = Object.values(data);
-    const placeholders = keys.map((_, index) => `$${index + 1}`).join(', ');
-    
-    const text = `INSERT INTO ${table} (${keys.join(', ')}) VALUES (${placeholders}) RETURNING *`;
-    return await db.getOne(text, values);
-  },
-
-  // Update and return
-  update: async (table, id, data) => {
-    const keys = Object.keys(data);
-    const values = Object.values(data);
-    const setClause = keys.map((key, index) => `${key} = $${index + 2}`).join(', ');
-    
-    const text = `UPDATE ${table} SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`;
-    return await db.getOne(text, [id, ...values]);
-  },
-
-  // Delete and return
-  delete: async (table, id) => {
-    const text = `DELETE FROM ${table} WHERE id = $1 RETURNING *`;
-    return await db.getOne(text, [id]);
-  },
-
-  // Check if exists
-  exists: async (table, condition, params) => {
-    const text = `SELECT 1 FROM ${table} WHERE ${condition} LIMIT 1`;
-    const result = await db.query(text, params);
-    return result.rows.length > 0;
-  },
-
-  // Count rows
-  count: async (table, condition = '1=1', params = []) => {
-    const text = `SELECT COUNT(*) as count FROM ${table} WHERE ${condition}`;
-    const result = await db.getOne(text, params);
-    return parseInt(result.count);
+    try {
+      const res = await pool.query(text, params);
+      return res.rows;
+    } catch (error) {
+      logger.error('Database getMany error:', error);
+      throw error;
+    }
   }
 };
 
 // Redis helper functions
 const redis = {
-  // Get value
-  get: async (key) => {
-    try {
-      return await redisClient.get(key);
-    } catch (error) {
-      logger.error('Redis GET error:', error);
-      return null;
-    }
-  },
-
-  // Set value
+  // Set value with expiration
   set: async (key, value, ttl = 3600) => {
     try {
-      if (ttl) {
-        await redisClient.setEx(key, ttl, value);
-      } else {
-        await redisClient.set(key, value);
-      }
-      return true;
+      const stringValue = typeof value === 'string' ? value : JSON.stringify(value);
+      return await redisClient.setEx(key, ttl, stringValue);
     } catch (error) {
       logger.error('Redis SET error:', error);
       return false;
     }
   },
 
-  // Delete value
+  // Set JSON value with expiration
+  setJSON: async (key, value, ttl = 3600) => {
+    try {
+      const stringValue = JSON.stringify(value);
+      return await redisClient.setEx(key, ttl, stringValue);
+    } catch (error) {
+      logger.error('Redis SET JSON error:', error);
+      return false;
+    }
+  },
+
+  // Get value
+  get: async (key) => {
+    try {
+      const value = await redisClient.get(key);
+      if (!value) return null;
+      try {
+        return JSON.parse(value);
+      } catch {
+        return value;
+      }
+    } catch (error) {
+      logger.error('Redis GET error:', error);
+      return null;
+    }
+  },
+
+  // Delete key
   del: async (key) => {
     try {
       return await redisClient.del(key);
@@ -181,36 +150,11 @@ const redis = {
   // Check if key exists
   exists: async (key) => {
     try {
-      return await redisClient.exists(key);
+      const result = await redisClient.exists(key);
+      return result === 1;
     } catch (error) {
       logger.error('Redis EXISTS error:', error);
       return false;
-    }
-  },
-
-  // Set JSON value
-  setJSON: async (key, value, ttl = 3600) => {
-    return await redis.set(key, JSON.stringify(value), ttl);
-  },
-
-  // Get JSON value
-  getJSON: async (key) => {
-    const value = await redis.get(key);
-    try {
-      return value ? JSON.parse(value) : null;
-    } catch (error) {
-      logger.error('Redis JSON parse error:', error);
-      return null;
-    }
-  },
-
-  // Increment counter
-  incr: async (key) => {
-    try {
-      return await redisClient.incr(key);
-    } catch (error) {
-      logger.error('Redis INCR error:', error);
-      return 0;
     }
   },
 
@@ -221,16 +165,6 @@ const redis = {
     } catch (error) {
       logger.error('Redis SADD error:', error);
       return false;
-    }
-  },
-
-  // Get all set members
-  smembers: async (key) => {
-    try {
-      return await redisClient.sMembers(key);
-    } catch (error) {
-      logger.error('Redis SMEMBERS error:', error);
-      return [];
     }
   },
 

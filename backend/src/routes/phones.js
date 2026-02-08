@@ -1,7 +1,7 @@
 const express = require('express');
 const { body, query } = require('express-validator');
 const phoneController = require('../controllers/phoneController');
-const { auth, phoneOwnership } = require('../middleware/auth');
+const { auth } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -18,18 +18,29 @@ router.get('/', [
 ], phoneController.getPhones);
 
 router.get('/:phoneId', [
-  auth,
-  phoneOwnership
+  auth
 ], phoneController.getPhoneById);
 
 router.put('/:phoneId', [
   auth,
-  phoneOwnership
+  body('phoneNumber').notEmpty().withMessage('Phone number is required'),
+  body('deviceName').optional().isString().withMessage('Device name must be a string')
 ], phoneController.updatePhone);
 
 router.delete('/:phoneId', [
-  auth,
-  phoneOwnership
+  auth
 ], phoneController.deletePhone);
+
+router.post('/:phoneId/generate-qr', [
+  auth
+], phoneController.generateQR);
+
+router.get('/:phoneId/qr-image', [
+  auth
+], phoneController.getQRImage);
+
+router.get('/:phoneId/status', [
+  auth
+], phoneController.getConnectionStatus);
 
 module.exports = router;

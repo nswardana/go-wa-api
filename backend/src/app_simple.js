@@ -4,7 +4,6 @@ require('dotenv').config();
 
 const config = require('./config/database');
 const logger = require('./utils/logger');
-const { startCronJobs } = require('./utils/cron');
 const { auth: authMiddleware } = require('./middleware/auth');
 const errorHandler = require('./middleware/errorHandler');
 
@@ -16,9 +15,6 @@ const phoneRoutes = require('./routes/phones');
 const messageRoutes = require('./routes/messages');
 const webhookRoutes = require('./routes/webhooks');
 const statsRoutes = require('./routes/stats');
-
-// Start cron jobs
-startCronJobs();
 
 // Initialize Express app
 const app = express();
@@ -57,14 +53,7 @@ app.use('/api/simple-auth', simpleAuthRoutes);
 app.use('/api/users', authMiddleware, userRoutes);
 app.use('/api/phones', authMiddleware, phoneRoutes);
 app.use('/api/messages', authMiddleware, messageRoutes);
-app.use('/api/templates', authMiddleware, require('./routes/templates'));
-app.use('/api/schedules', authMiddleware, require('./routes/schedules'));
-app.use('/api/external-whatsapp', authMiddleware, require('./routes/externalWhatsApp'));
 app.use('/api/webhooks', authMiddleware, webhookRoutes);
-app.use('/api/stats', authMiddleware, statsRoutes);
-
-// User Message API (v1) - Public API with API Key authentication
-app.use('/v1', require('./routes/userMessage'));
 
 // Public webhook endpoint (no auth required)
 app.use('/webhook', require('./routes/publicWebhook'));

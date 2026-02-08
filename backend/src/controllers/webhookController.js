@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 const { validationResult } = require('express-validator');
 
 class WebhookController {
-  // Handle incoming webhook from Evolution API
+  // Handle incoming webhook from ChatFlow
   async handleWebhook(req, res) {
     try {
       const signature = req.header('X-Webhook-Signature');

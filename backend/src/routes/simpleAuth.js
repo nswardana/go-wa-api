@@ -10,7 +10,18 @@ const router = express.Router();
 
 // Simple login without Redis
 router.post('/login', [
-  body('email').isEmail().withMessage('Valid email is required'),
+  body('email').custom(value => {
+    const trimmedEmail = value.trim();
+    if (!trimmedEmail) {
+      throw new Error('Email is required');
+    }
+    // Basic email validation regex
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(trimmedEmail)) {
+      throw new Error('Valid email is required');
+    }
+    return true;
+  }),
   body('password').notEmpty().withMessage('Password is required')
 ], async (req, res) => {
   try {
@@ -24,8 +35,11 @@ router.post('/login', [
 
     const { email, password } = req.body;
 
+    // Trim whitespace from email
+    const trimmedEmail = email.trim();
+
     // Find user by email
-    const user = await User.findByEmail(email);
+    const user = await User.findByEmail(trimmedEmail);
     if (!user) {
       return res.status(401).json({
         error: 'Invalid credentials'
@@ -50,7 +64,7 @@ router.post('/login', [
       process.env.JWT_SECRET || 'fallback_secret',
       { 
         expiresIn: '24h',
-        issuer: 'evolution-api',
+        issuer: 'chatflow',
         audience: 'evolution-client'
       }
     );

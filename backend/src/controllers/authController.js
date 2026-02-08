@@ -16,7 +16,7 @@ class AuthController {
       user.jwt_secret,
       { 
         expiresIn: process.env.JWT_EXPIRES_IN || '24h',
-        issuer: 'evolution-api',
+        issuer: 'chatflow',
         audience: 'evolution-client'
       }
     );
@@ -35,17 +35,23 @@ class AuthController {
 
       const { username, email, password } = req.body;
 
-      // Check if user already exists
-      const existingUser = await Promise.any([
-        User.findByEmail(email),
-        User.findByUsername(username)
-      ]).catch(() => null);
+      logger.info('Registration attempt:', { username, email });
 
-      if (existingUser) {
-        return res.status(409).json({
-          error: 'User already exists',
-          field: existingUser.email === email ? 'email' : 'username'
-        });
+      // Check if user already exists
+      try {
+        const existingUser = await Promise.any([
+          User.findByEmail(email),
+          User.findByUsername(username)
+        ]).catch(() => null);
+
+        if (existingUser) {
+          return res.status(409).json({
+            error: 'User already exists',
+            field: existingUser.email === email ? 'email' : 'username'
+          });
+        }
+      } catch (error) {
+        logger.error('Error checking existing user:', error);
       }
 
       // Create new user
@@ -55,16 +61,23 @@ class AuthController {
         password
       });
 
+      logger.info('User created successfully:', { userId: user.id, username });
+
       // Generate token
       const token = this.generateToken(user);
 
       // Cache user session
-      await redis.setJSON(`session:${user.id}`, {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        apiKey: user.api_key
-      }, 86400); // 24 hours
+      try {
+        await redis.setJSON(`session:${user.id}`, {
+          id: user.id,
+          username: user.username,
+          email: user.email,
+          apiKey: user.api_key
+        }, 86400); // 24 hours
+      } catch (redisError) {
+        logger.warn('Redis session caching failed:', redisError);
+        // Continue without Redis caching
+      }
 
       logger.info(`User registered: ${username} (${email})`);
 
@@ -102,6 +115,8 @@ class AuthController {
 
       const { email, password } = req.body;
 
+      logger.info('Login attempt:', { email });
+
       // Find user by email
       const user = await User.findByEmail(email);
       if (!user) {
@@ -116,6 +131,7 @@ class AuthController {
       // Validate password
       const isValidPassword = await User.validatePassword(password, user.password_hash);
       if (!isValidPassword) {
+        logger.warn('Invalid password for user', { userId: user.id, email });
         return res.status(401).json({
           error: 'Invalid credentials'
         });
@@ -131,18 +147,23 @@ class AuthController {
         user.jwt_secret,
         { 
           expiresIn: process.env.JWT_EXPIRES_IN || '24h',
-          issuer: 'evolution-api',
+          issuer: 'chatflow',
           audience: 'evolution-client'
         }
       );
 
       // Cache user session
-      await redis.setJSON(`session:${user.id}`, {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        apiKey: user.api_key
-      }, 86400); // 24 hours
+      try {
+        await redis.setJSON(`session:${user.id}`, {
+          id: user.id,
+          username: user.username,
+          email: user.email,
+          apiKey: user.api_key
+        }, 86400); // 24 hours
+      } catch (redisError) {
+        logger.warn('Redis session caching failed:', redisError);
+        // Continue without Redis caching
+      }
 
       logger.info(`User logged in: ${user.username} (${user.email})`);
 
