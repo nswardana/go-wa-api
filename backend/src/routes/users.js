@@ -2,6 +2,7 @@ const express = require('express');
 const { query } = require('express-validator');
 const userController = require('../controllers/userController');
 const { auth, authenticateToken } = require('../middleware/auth');
+const { db } = require('../config/database');
 
 const router = express.Router();
 
@@ -54,6 +55,37 @@ router.get('/', [
     .isString()
     .withMessage('Search must be a string')
 ], userController.getAllUsers);
+
+// Get API Keys for current user
+router.get('/api-keys', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    const query = 'SELECT id, username, email, api_key, created_at, updated_at FROM users WHERE id = $1';
+    const result = await db.query(query, [userId]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const user = result.rows[0];
+    
+    res.json({
+      status: 'success',
+      data: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        api_key: user.api_key,
+        created_at: user.created_at,
+        updated_at: user.updated_at
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching API keys:', error);
+    res.status(500).json({ error: 'Failed to fetch API keys' });
+  }
+});
 
 /**
  * @swagger
@@ -162,37 +194,6 @@ router.delete('/:id', [
     .withMessage('ID must be an integer')
 ], userController.deleteUser);
 
-// Get API Keys for current user
-// router.get('/api-keys', authenticateToken, async (req, res) => {
-//   try {
-//     const userId = req.user.id;
-//     
-//     const query = 'SELECT id, username, email, api_key, created_at, updated_at FROM users WHERE id = $1';
-//     const result = await db.query(query, [userId]);
-//     
-//     if (result.rows.length === 0) {
-//       return res.status(404).json({ error: 'User not found' });
-//     }
-//     
-//     const user = result.rows[0];
-//     
-//     res.json({
-//       status: 'success',
-//       data: {
-//         id: user.id,
-//         username: user.username,
-//         email: user.email,
-//         api_key: user.api_key,
-//         created_at: user.created_at,
-//         updated_at: user.updated_at
-//       }
-//     });
-//   } catch (error) {
-//     console.error('Error fetching API keys:', error);
-//     res.status(500).json({ error: 'Failed to fetch API keys' });
-//   }
-// });
-
 // Generate new API Key for user
 // router.post('/generate-api-key', authenticateToken, async (req, res) => {
 //   try {
@@ -223,29 +224,28 @@ router.delete('/:id', [
 // });
 
 // Get Phone Numbers with Number Keys for current user
-// router.get('/phones/with-keys', authenticateToken, async (req, res) => {
-//   try {
-//     const userId = req.user.id;
-//     
-//     const query = `
-//       SELECT p.id, p.phone_number, p.device_name, p.number_key, p.is_connected, 
-//              p.created_at, p.updated_at, e.name as evolution_instance
-//       FROM phone_numbers p
-//       LEFT JOIN evolution_instances e ON p.evolution_instance_id = e.id
-//       WHERE p.user_id = $1
-//       ORDER BY p.created_at DESC
-//     `;
-//     const result = await db.query(query, [userId]);
-//     
-//     res.json({
-//       status: 'success',
-//       data: result.rows
-//     });
-//   } catch (error) {
-//     console.error('Error fetching phone numbers with keys:', error);
-//     res.status(500).json({ error: 'Failed to fetch phone numbers' });
-//   }
-// });
+router.get('/phones/with-keys', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    const query = `
+      SELECT p.id, p.phone_number, p.device_name, p.token as number_key, p.is_connected, 
+             p.created_at, p.updated_at
+      FROM phone_numbers p
+      WHERE p.user_id = $1
+      ORDER BY p.created_at DESC
+    `;
+    const result = await db.query(query, [userId]);
+    
+    res.json({
+      status: 'success',
+      data: result.rows
+    });
+  } catch (error) {
+    console.error('Error fetching phone numbers with keys:', error);
+    res.status(500).json({ error: 'Failed to fetch phone numbers' });
+  }
+});
 
 // Generate new Number Key for phone
 // router.post('/phones/:id/generate-number-key', authenticateToken, async (req, res) => {

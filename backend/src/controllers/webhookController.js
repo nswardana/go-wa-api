@@ -1,392 +1,549 @@
-const webhookService = require('../services/webhookService');
-const PhoneNumber = require('../models/PhoneNumber');
-const WebhookEvent = require('../models/WebhookEvent');
+const { db } = require('../config/database');
 const logger = require('../utils/logger');
-const { validationResult } = require('express-validator');
+const { io } = require('../app');
+const gowaMessageService = require('../services/gowaMessageService');
 
-class WebhookController {
-  // Handle incoming webhook from ChatFlow
-  async handleWebhook(req, res) {
-    try {
-      const signature = req.header('X-Webhook-Signature');
-      const payload = req.body;
+// Handle GOWA message
+const handleGOWAMessage = async (deviceId, payload) => {
+  console.log('=== GOWA WEBHOOK DEBUG START ===');
+  console.log('handleGOWAMessage called with:', deviceId, payload);
+  logger.info('handleGOWAMessage called with:', { deviceId, payload });
+  
+  const {
+    id: messageId,
+    from,
+    fromMe,
+    isGroup,
+    timestamp,
+    pushName,
+    message,
+    media,
+    body
+  } = payload;
 
-      // Log incoming webhook
-      logger.info('Incoming webhook received', {
-        ip: req.ip,
-        userAgent: req.get('User-Agent'),
-        signature: signature ? 'present' : 'missing',
-        payloadKeys: Object.keys(payload)
-      });
+  console.log('Extracted data:', { messageId, from, fromMe, isGroup, timestamp, pushName, message, media, body });
 
-      // Validate payload structure
-      if (!payload || typeof payload !== 'object') {
-        return res.status(400).json({
-          error: 'Invalid payload',
-          message: 'Payload must be a valid JSON object'
+  // Skip pesan yang kita kirim sendiri
+  if (fromMe) {
+    console.log('Skipping own message');
+    return;
+  }
+
+  // Handle device_id that might be a phone number
+  let actualDeviceId = deviceId;
+  if (deviceId.includes('@s.whatsapp.net') || deviceId.includes('@g.us')) {
+    // Extract phone number from device_id and map to our device
+    actualDeviceId = 'chatflow-api-1';
+    console.log('Device ID is phone number, mapping to:', actualDeviceId);
+  }
+
+  console.log('Looking up phone for device:', actualDeviceId);
+  // Cari phone record berdasarkan device_id
+  const phoneResult = await db.query(
+    'SELECT id FROM phone_numbers WHERE device_name = $1 LIMIT 1',
+    [actualDeviceId]
+  );
+  const phoneId = phoneResult.rows[0]?.id || null;
+
+  console.log('Phone lookup result:', { phoneId, rows: phoneResult.rows });
+
+  if (!phoneId) {
+    console.log('No phone found for device:', actualDeviceId);
+    logger.warn(`No phone found for device: ${actualDeviceId}`);
+    return;
+  }
+
+  console.log('Phone found:', phoneId);
+  logger.info('Phone found:', { phoneId, deviceId: actualDeviceId });
+
+  // Extract nomor pengirim (hapus @s.whatsapp.net)
+  const senderPhone = from.replace('@s.whatsapp.net', '').replace('@g.us', '').replace('@lid', '');
+
+  // Tentukan tipe pesan
+  let messageType = 'text';
+  let messageContent = body || message?.text || message?.caption || '';
+
+  if (media) {
+    if (media.mimeType?.startsWith('image/')) messageType = 'image';
+    else if (media.mimeType?.startsWith('video/')) messageType = 'video';
+    else if (media.mimeType?.startsWith('audio/')) messageType = 'audio';
+    else messageType = 'document';
+    messageContent = body || message?.caption || `[${messageType}]`;
+  }
+
+  console.log('Message data:', { messageId, phoneId, senderPhone, messageType, messageContent });
+  logger.info('Message data:', { messageId, phoneId, senderPhone, messageType, messageContent });
+
+  try {
+    console.log('Attempting database insert...');
+    
+    // Handle timestamp conversion
+    let createdAt;
+    if (typeof timestamp === 'string') {
+      // If timestamp is a string, try to parse it
+      const parsedDate = new Date(timestamp);
+      if (isNaN(parsedDate.getTime())) {
+        // If parsing fails, use current time
+        createdAt = new Date().toISOString();
+      } else {
+        createdAt = parsedDate.toISOString();
+      }
+    } else if (typeof timestamp === 'number') {
+      // If timestamp is a number, treat as Unix timestamp
+      createdAt = new Date(timestamp * 1000).toISOString();
+    } else {
+      // Fallback to current time
+      createdAt = new Date().toISOString();
+    }
+    
+    console.log('Timestamp conversion:', { timestamp, createdAt });
+    
+    // Simpan ke existing messages table
+    const saved = await db.query(`
+      INSERT INTO messages (
+        phone_number_id, message_id, from_number, to_number,
+        message_type, content, media_url, media_type, status, webhook_sent, created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      RETURNING *
+    `, [
+      phoneId,
+      messageId,
+      senderPhone,
+      phoneId, // Gunakan phoneId sebagai to_number
+      messageType,
+      messageContent,
+      null, // media_url
+      null, // media_type
+      'received',
+      false, // webhook_sent
+      createdAt
+    ]);
+
+    console.log('Database insert result:', saved);
+    console.log('Rows affected:', saved.rowCount, 'Rows returned:', saved.rows);
+
+    if (saved.rows.length > 0) {
+      logger.info(`GOWA Message saved: ${messageId} from ${senderPhone}`);
+
+      // Kirim realtime ke frontend via Socket.io
+      if (io) {
+        io.emit('incoming_message', {
+          ...saved.rows[0],
+          pushName: pushName || senderPhone
         });
       }
 
-      // Extract phone token from payload or headers
-      const phoneToken = payload.phoneToken || req.header('X-Phone-Token');
-      
-      if (!phoneToken) {
-        return res.status(400).json({
-          error: 'Missing phone token',
-          message: 'Phone token is required'
-        });
-      }
+      // Trigger auto-reply
+      await triggerAutoReply(saved.rows[0], payload);
+    } else {
+      console.log('No rows inserted - possibly duplicate');
+    }
+  } catch (error) {
+    console.error('Database insert error:', error);
+    logger.error('Database insert error:', error);
+  }
 
-      // Find phone number by token
-      const phone = await PhoneNumber.findByToken(phoneToken);
-      if (!phone) {
-        logger.warn('Webhook received with invalid phone token', {
-          phoneToken,
-          ip: req.ip
-        });
-        return res.status(404).json({
-          error: 'Phone not found',
-          message: 'Invalid phone token'
-        });
-      }
+  console.log('=== GOWA WEBHOOK DEBUG END ===');
+};
 
-      // Verify webhook signature if configured
-      if (phone.webhook_secret && signature) {
-        const isValidSignature = WebhookEvent.verifySignature(
-          payload, 
-          signature.replace('sha256=', ''), 
-          phone.webhook_secret
-        );
-        
-        if (!isValidSignature) {
-          logger.warn('Invalid webhook signature', {
-            phoneId: phone.id,
-            phoneToken,
-            ip: req.ip
-          });
-          return res.status(401).json({
-            error: 'Invalid signature',
-            message: 'Webhook signature verification failed'
-          });
+// Handle GOWA message acknowledgment
+const handleMessageAck = async (deviceId, payload) => {
+  const { id: messageId, ack } = payload;
+  // ack: 1=sent, 2=delivered, 3=read
+
+  // Handle device_id that might be a phone number
+  let actualDeviceId = deviceId;
+  if (deviceId.includes('@s.whatsapp.net') || deviceId.includes('@g.us')) {
+    actualDeviceId = 'chatflow-api-1';
+  }
+
+  const statusMap = { 1: 'sent', 2: 'delivered', 3: 'read' };
+
+  try {
+    const result = await db.query(`
+      UPDATE messages 
+      SET status = $1, updated_at = NOW()
+      WHERE message_id = $2
+    `, [statusMap[ack] || 'unknown', messageId]);
+    
+    console.log(`Message ACK updated: ${messageId} -> ${statusMap[ack] || 'unknown'}`, { rowsAffected: result.rowCount });
+  } catch (error) {
+    console.error('Error updating message ACK:', error);
+  }
+};
+
+// Handle GOWA message revoked
+const handleMessageRevoked = async (deviceId, payload) => {
+  await db.query(`
+    UPDATE messages 
+    SET status = 'revoked', updated_at = NOW()
+    WHERE message_id = $1
+  `, [payload.id]);
+};
+
+// Send WhatsApp message via ChatFlow Message Controller
+const sendWhatsAppMessage = async (phoneNumber, message) => {
+  try {
+    console.log('Sending WhatsApp message via ChatFlow:', { phoneNumber, message });
+    
+    // Get phone ID for the registered phone
+    const phoneResult = await db.query(
+      'SELECT id FROM phone_numbers WHERE device_name = $1 LIMIT 1',
+      ['chatflow-api-1']
+    );
+    
+    if (phoneResult.rows.length === 0) {
+      throw new Error('No registered phone found');
+    }
+    
+    const phoneId = phoneResult.rows[0].id;
+    
+    // Create mock request object for message controller
+    const mockReq = {
+      user: { id: 1 }, // Assuming user ID 1 for auto-reply
+      body: {
+        phone_id: phoneId,
+        to: phoneNumber,
+        message: message,
+        type: 'text'
+      }
+    };
+    
+    // Create mock response object
+    let responseData = null;
+    const mockRes = {
+      status: (code) => ({
+        json: (data) => {
+          responseData = data;
+          return responseData;
         }
+      })
+    };
+    
+    // Import and use message controller
+    const messageController = require('./messageController');
+    await messageController.sendMessage(mockReq, mockRes);
+    
+    console.log('WhatsApp message sent successfully via ChatFlow:', responseData);
+    return { success: true, data: responseData };
+  } catch (error) {
+    console.error('Error sending WhatsApp message:', error.message);
+    logger.error('Error sending WhatsApp message:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+// Trigger auto-reply
+const triggerAutoReply = async (savedMessage, rawPayload) => {
+  if (savedMessage.is_group) return; // skip group message dulu
+  
+  try {
+    // Import auto-reply service
+    const autoReplyService = require('../services/autoReplyService');
+    
+    // Get the registered phone number for auto-reply
+    const phoneResult = await db.query(
+      'SELECT phone_number FROM phone_numbers WHERE id = $1',
+      [savedMessage.phone_number_id]
+    );
+    
+    if (phoneResult.rows.length > 0) {
+      const registeredPhone = phoneResult.rows[0].phone_number; // Keep the + sign
+      
+      console.log('Using registered phone for auto-reply:', registeredPhone);
+      
+      // Call auto-reply service with registered phone number
+      const replyResult = await autoReplyService.processMessage(registeredPhone, savedMessage.content);
+      
+      console.log('Auto-reply result:', replyResult);
+      
+      if (replyResult.shouldReply) {
+        console.log('Auto-reply triggered:', replyResult.response);
+        
+        // Send actual WhatsApp message
+        const sendResult = await sendWhatsAppMessage(savedMessage.from_number, replyResult.response);
+        
+        if (sendResult.success) {
+          console.log('Auto-reply sent successfully via ChatFlow');
+        } else {
+          console.error('Failed to send auto-reply via ChatFlow:', sendResult.error);
+        }
+      } else {
+        console.log('No auto-reply configured for this message');
       }
+    } else {
+      console.log('No registered phone found for auto-reply');
+    }
+  } catch (error) {
+    logger.error('Auto-reply error:', error);
+    console.error('Auto-reply error:', error);
+  }
+};
 
-      // Process webhook events based on type
-      const eventType = payload.event || 'message';
-      let processedEvent;
+const webhookController = {
+  async handleIncoming(req, res) {
+    // Langsung balas 200 OK dulu ke GOWA agar tidak timeout
+    res.status(200).json({ received: true });
 
-      switch (eventType) {
+    try {
+      const { event, device_id, payload } = req.body;
+
+      logger.info(`Webhook received: event=${event}, device=${device_id}`);
+      logger.info('Webhook payload:', req.body);
+
+      // Route berdasarkan jenis event
+      switch (event) {
         case 'message':
-        case 'message.received':
-          processedEvent = await this.processMessageWebhook(phone.id, payload);
+          await handleGOWAMessage(device_id, payload);
           break;
-          
         case 'message.ack':
-          processedEvent = await this.processMessageAckWebhook(phone.id, payload);
+          await handleMessageAck(device_id, payload);
           break;
-          
-        case 'message.reaction':
-          processedEvent = await this.processMessageReactionWebhook(phone.id, payload);
+        case 'message.revoked':
+          await handleMessageRevoked(device_id, payload);
           break;
-          
-        case 'connection.status':
-          processedEvent = await this.processConnectionWebhook(phone.id, payload);
-          break;
-          
-        case 'group.participants':
-        case 'group.joined':
-        case 'group.left':
-          processedEvent = await this.processGroupWebhook(phone.id, payload);
-          break;
-          
         default:
-          processedEvent = await webhookService.createEvent(phone.id, eventType, payload);
+          logger.info(`Unhandled event: ${event}`);
       }
-
-      // Update phone last seen
-      await PhoneNumber.updateLastSeen(phone.id);
-
-      // Send real-time update via WebSocket if user is connected
-      if (global.broadcast) {
-        global.broadcast(phone.user_id, {
-          type: 'webhook',
-          event: eventType,
-          phoneId: phone.id,
-          data: payload,
-          timestamp: new Date().toISOString()
-        });
-      }
-
-      logger.info('Webhook processed successfully', {
-        eventId: processedEvent.id,
-        phoneId: phone.id,
-        eventType,
-        userId: phone.user_id
-      });
-
-      res.status(200).json({
-        success: true,
-        eventId: processedEvent.id,
-        message: 'Webhook processed successfully'
-      });
 
     } catch (error) {
-      logger.error('Webhook processing error', {
-        error: error.message,
-        stack: error.stack,
-        body: req.body
-      });
-
-      res.status(500).json({
-        error: 'Internal server error',
-        message: 'Failed to process webhook'
-      });
+      logger.error('Webhook processing error:', error);
     }
-  }
+  },
 
-  // Process message webhook
-  async processMessageWebhook(phoneId, payload) {
-    const messageData = {
-      id: payload.data?.id || payload.id,
-      from_number: payload.data?.from || payload.from,
-      to_number: payload.data?.to || payload.to,
-      message_type: payload.data?.type || payload.type || 'text',
-      content: payload.data?.body || payload.content,
-      media_url: payload.data?.mediaUrl || payload.mediaUrl,
-      media_type: payload.data?.mediaType || payload.mediaType,
-      created_at: payload.data?.timestamp || payload.timestamp || new Date().toISOString(),
-      status: 'received'
-    };
+  // Start message polling
+  startMessagePolling() {
+    logger.info('Starting GOWA message polling service');
+    gowaMessageService.startPolling();
+  },
 
-    return await webhookService.createMessageWebhook(phoneId, messageData, 'message.received');
-  }
+  // Stop message polling
+  stopMessagePolling() {
+    logger.info('Stopping GOWA message polling service');
+    gowaMessageService.stopPolling();
+  },
 
-  // Process message acknowledgment webhook
-  async processMessageAckWebhook(phoneId, payload) {
-    const ackData = {
-      id: payload.data?.id || payload.id,
-      status: payload.data?.status || payload.status,
-      timestamp: payload.data?.timestamp || payload.timestamp || new Date().toISOString()
-    };
-
-    return await webhookService.createEvent(phoneId, 'message.ack', ackData);
-  }
-
-  // Process message reaction webhook
-  async processMessageReactionWebhook(phoneId, payload) {
-    const reactionData = {
-      messageId: payload.data?.messageId || payload.messageId,
-      reaction: payload.data?.reaction || payload.reaction,
-      from: payload.data?.from || payload.from,
-      timestamp: payload.data?.timestamp || payload.timestamp || new Date().toISOString()
-    };
-
-    return await webhookService.createEvent(phoneId, 'message.reaction', reactionData);
-  }
-
-  // Process connection status webhook
-  async processConnectionWebhook(phoneId, payload) {
-    const isConnected = payload.data?.connected || payload.connected;
-    const qrCode = payload.data?.qrCode || payload.qrCode;
-
-    // Update phone connection status in database
-    await PhoneNumber.updateConnectionStatus(phoneId, isConnected, null, qrCode);
-
-    return await webhookService.createConnectionWebhook(phoneId, isConnected, qrCode);
-  }
-
-  // Process group webhook
-  async processGroupWebhook(phoneId, payload) {
-    const groupData = {
-      id: payload.data?.groupId || payload.groupId,
-      name: payload.data?.groupName || payload.groupName,
-      participants: payload.data?.participants || payload.participants,
-      action: payload.data?.action || payload.action
-    };
-
-    const eventType = payload.event || 'group.participants';
-    return await webhookService.createGroupWebhook(phoneId, groupData, eventType.replace('group.', ''));
-  }
-
-  // Get webhook events for a phone number
+  // Missing methods required by routes
   async getEvents(req, res) {
     try {
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({
-          error: 'Validation failed',
-          details: errors.array()
-        });
-      }
-
       const { phoneId } = req.params;
       const { limit = 50, offset = 0, eventType } = req.query;
 
-      let result;
-      if (eventType) {
-        result = await WebhookEvent.findByEventType(eventType, phoneId, parseInt(limit), parseInt(offset));
-      } else {
-        result = await WebhookEvent.findByPhoneNumberId(phoneId, parseInt(limit), parseInt(offset));
-      }
+      const events = await db.query(`
+        SELECT * FROM webhook_events 
+        WHERE phone_id = $1 ${eventType ? 'AND event_type = $2' : ''}
+        ORDER BY created_at DESC 
+        LIMIT $${eventType ? 3 : 2} OFFSET $${eventType ? 4 : 3}
+      `, eventType ? [phoneId, eventType, limit, offset] : [phoneId, limit, offset]);
 
       res.json({
         success: true,
-        ...result
+        events: events.rows,
+        pagination: {
+          limit: parseInt(limit),
+          offset: parseInt(offset),
+          total: events.rowCount || 0
+        }
       });
-
     } catch (error) {
-      logger.error('Get webhook events error', error);
+      logger.error('Error getting webhook events:', error);
       res.status(500).json({
-        error: 'Internal server error',
-        message: 'Failed to get webhook events'
+        success: false,
+        error: 'Internal server error'
       });
     }
-  }
+  },
 
-  // Get webhook statistics
   async getStats(req, res) {
     try {
       const { phoneId } = req.params;
-      const stats = await webhookService.getStats(phoneId, req.user.id);
+
+      const stats = await db.query(`
+        SELECT 
+          COUNT(*) as total_events,
+          COUNT(CASE WHEN created_at > NOW() - INTERVAL '24 hours' THEN 1 END) as last_24h,
+          COUNT(CASE WHEN created_at > NOW() - INTERVAL '7 days' THEN 1 END) as last_7d,
+          COUNT(CASE WHEN created_at > NOW() - INTERVAL '30 days' THEN 1 END) as last_30d
+        FROM webhook_events 
+        WHERE phone_id = $1
+      `, [phoneId]);
 
       res.json({
         success: true,
-        stats
+        stats: stats.rows[0]
       });
-
     } catch (error) {
-      logger.error('Get webhook stats error', error);
+      logger.error('Error getting webhook stats:', error);
       res.status(500).json({
-        error: 'Internal server error',
-        message: 'Failed to get webhook statistics'
+        success: false,
+        error: 'Internal server error'
       });
     }
-  }
+  },
 
-  // Test webhook endpoint
   async testWebhook(req, res) {
     try {
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({
-          error: 'Validation failed',
-          details: errors.array()
-        });
-      }
-
       const { phoneId } = req.params;
-      const { webhookUrl } = req.body;
+      
+      // Test webhook by sending a test event
+      const testPayload = {
+        event: 'test',
+        device_id: 'test-device',
+        payload: {
+          test: true,
+          timestamp: Date.now()
+        }
+      };
 
-      const result = await webhookService.testWebhook(phoneId, webhookUrl);
+      // Send test webhook
+      await handleGOWAMessage('test-device', testPayload.payload);
 
-      if (result.success) {
-        res.json({
-          success: true,
-          message: 'Webhook test successful',
-          statusCode: result.statusCode,
-          duration: result.duration
-        });
-      } else {
-        res.status(400).json({
-          success: false,
-          error: 'Webhook test failed',
-          details: result.error
-        });
-      }
-
+      res.json({
+        success: true,
+        message: 'Test webhook sent successfully'
+      });
     } catch (error) {
-      logger.error('Test webhook error', error);
+      logger.error('Error testing webhook:', error);
       res.status(500).json({
-        error: 'Internal server error',
-        message: 'Failed to test webhook'
+        success: false,
+        error: 'Internal server error'
       });
     }
-  }
+  },
 
-  // Retry failed webhooks
   async retryFailed(req, res) {
     try {
       const { phoneId } = req.params;
       
-      const events = await webhookService.retryFailed(phoneId);
+      // Retry failed webhook events
+      const failedEvents = await db.query(`
+        SELECT * FROM webhook_events 
+        WHERE phone_id = $1 AND status = 'failed'
+        ORDER BY created_at ASC
+        LIMIT 10
+      `, [phoneId]);
+
+      for (const event of failedEvents.rows) {
+        try {
+          // Retry processing the event
+          await handleGOWAMessage(event.device_id, event.payload);
+          
+          // Update status to success
+          await db.query(`
+            UPDATE webhook_events 
+            SET status = 'success', updated_at = NOW()
+            WHERE id = $1
+          `, [event.id]);
+        } catch (error) {
+          logger.error(`Failed to retry webhook event ${event.id}:`, error);
+        }
+      }
 
       res.json({
         success: true,
-        message: `${events.length} failed webhooks queued for retry`,
-        retriedCount: events.length
+        message: `Retried ${failedEvents.rows.length} failed webhook events`
       });
-
     } catch (error) {
-      logger.error('Retry webhooks error', error);
+      logger.error('Error retrying failed webhooks:', error);
       res.status(500).json({
-        error: 'Internal server error',
-        message: 'Failed to retry webhooks'
+        success: false,
+        error: 'Internal server error'
       });
     }
-  }
+  },
 
-  // Get recent webhook events
   async getRecentEvents(req, res) {
     try {
       const { phoneId } = req.params;
       const { limit = 10 } = req.query;
 
-      const events = await webhookService.getRecentEvents(phoneId, parseInt(limit));
+      const events = await db.query(`
+        SELECT * FROM webhook_events 
+        WHERE phone_id = $1 
+        ORDER BY created_at DESC 
+        LIMIT $2
+      `, [phoneId, limit]);
 
       res.json({
         success: true,
-        events
+        events: events.rows
       });
-
     } catch (error) {
-      logger.error('Get recent webhook events error', error);
+      logger.error('Error getting recent webhook events:', error);
       res.status(500).json({
-        error: 'Internal server error',
-        message: 'Failed to get recent webhook events'
+        success: false,
+        error: 'Internal server error'
       });
     }
-  }
+  },
 
-  // Get webhook queue status
   async getQueueStatus(req, res) {
     try {
-      const queueStatus = webhookService.getQueueStatus();
+      const queueStats = await db.query(`
+        SELECT 
+          COUNT(*) as total_pending,
+          COUNT(CASE WHEN created_at > NOW() - INTERVAL '1 hour' THEN 1 END) as last_hour
+        FROM webhook_events 
+        WHERE status = 'pending'
+      `);
 
       res.json({
         success: true,
-        queue: queueStatus
+        queue: {
+          pending: parseInt(queueStats.rows[0].total_pending),
+          last_hour: parseInt(queueStats.rows[0].last_hour)
+        }
       });
-
     } catch (error) {
-      logger.error('Get queue status error', error);
+      logger.error('Error getting queue status:', error);
       res.status(500).json({
-        error: 'Internal server error',
-        message: 'Failed to get queue status'
+        success: false,
+        error: 'Internal server error'
       });
     }
-  }
+  },
 
-  // Cleanup old webhook events
+  async clearQueue(req, res) {
+    try {
+      const result = await db.query(`
+        DELETE FROM webhook_events 
+        WHERE status = 'pending' AND created_at < NOW() - INTERVAL '24 hours'
+      `);
+
+      res.json({
+        success: true,
+        message: `Cleared ${result.rowCount} old pending events`
+      });
+    } catch (error) {
+      logger.error('Error clearing queue:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Internal server error'
+      });
+    }
+  },
+
   async cleanupEvents(req, res) {
     try {
       const { days = 30 } = req.body;
       
-      const deletedCount = await webhookService.cleanup(parseInt(days));
+      const result = await db.query(`
+        DELETE FROM webhook_events 
+        WHERE created_at < NOW() - INTERVAL '${days} days'
+      `);
 
       res.json({
         success: true,
-        message: `${deletedCount} old webhook events deleted`,
-        deletedCount
+        message: `Cleaned up ${result.rowCount} old webhook events`
       });
-
     } catch (error) {
-      logger.error('Cleanup webhook events error', error);
+      logger.error('Error cleaning up webhook events:', error);
       res.status(500).json({
-        error: 'Internal server error',
-        message: 'Failed to cleanup webhook events'
+        success: false,
+        error: 'Internal server error'
       });
     }
   }
-}
+};
 
-module.exports = new WebhookController();
+module.exports = webhookController;

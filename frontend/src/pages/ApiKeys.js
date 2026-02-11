@@ -58,7 +58,12 @@ const ApiKeys = () => {
       ]);
       
       setApiKeyData(apiKeysResponse.data);
-      setPhoneNumbers(phonesResponse.data || []);
+      // Handle both response formats: phonesResponse.phones or phonesResponse.data
+      const phonesData = phonesResponse.phones || phonesResponse.data || [];
+      setPhoneNumbers(phonesData);
+      console.log('API Keys Response:', apiKeysResponse);
+      console.log('Phones Response:', phonesResponse);
+      console.log('Phones Data:', phonesData);
     } catch (error) {
       console.error('Error fetching data:', error);
       setSnackbar({ open: true, message: 'Failed to fetch data', severity: 'error' });
@@ -257,7 +262,7 @@ const ApiKeys = () => {
                     </TableCell>
                     <TableCell>
                       <Chip 
-                        label={phone.evolution_instance || 'Unknown'}
+                        label={phone.evolution_name || 'chatflow-1'}
                         variant="outlined"
                         size="small"
                       />

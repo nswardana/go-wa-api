@@ -37,13 +37,15 @@ import {
   VpnKeyOutlined,
   PeopleOutlined,
   ApiOutlined,
+  Send,
   Menu as MenuIcon,
   ChevronLeft as ChevronLeftIcon,
   AccountCircleOutlined,
   LogoutOutlined,
   NotificationsOutlined,
   SearchOutlined,
-  KeyboardArrowDown
+  KeyboardArrowDown,
+  SmartToy
 } from '@mui/icons-material';
 import { useState } from 'react';
 
@@ -69,6 +71,27 @@ const menuItems = [
     title: 'Messages',
     icon: <MessageOutlined />,
     path: '/messages',
+    chip: null
+  },
+  {
+    id: 'contacts',
+    title: 'Contacts',
+    icon: <PeopleOutlined />,
+    path: '/contacts',
+    chip: null
+  },
+  {
+    id: 'broadcasts',
+    title: 'Broadcasts',
+    icon: <Send />,
+    path: '/broadcasts',
+    chip: null
+  },
+  {
+    id: 'auto-reply',
+    title: 'Smart Auto-Reply',
+    icon: <SmartToy />,
+    path: '/auto-reply',
     chip: null
   },
   {

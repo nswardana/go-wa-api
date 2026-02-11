@@ -119,36 +119,26 @@ class MessageController {
         });
       }
       
-      // Send message through ChatFlow (Mock for now - real API needs correct endpoint)
-      const messageId = 'msg_' + Date.now();
-      
-      // TODO: Implement real ChatFlow message sending
-      // For now, store message in database as mock
-      
-      // Store message in database
-      const messageQuery = `
-        INSERT INTO messages (phone_number_id, message_id, from_number, to_number, message_type, content, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING *
-      `;
-      
-      const messageResult = await db.query(messageQuery, [
-        phoneId,
-        messageId,
-        phone.phone_number,
-        to,
-        type,
-        content,
-        'sent'
-      ]);
-      
-      const messageRecord = messageResult.rows[0];
+      // Send message through Evolution Service
+      const sendResult = await evolutionService.sendMessage(phoneId, {
+        to: to,
+        content: content,
+        type: type,
+        media_url: media_url,
+        media_type: media_type
+      });
 
-      logger.info('Message sent (mock - ChatFlow endpoint needs correction):', {
+      if (!sendResult.success) {
+        throw new Error(sendResult.message || 'Failed to send message');
+      }
+
+      const messageRecord = sendResult.message;
+
+      logger.info('Message sent via Evolution Service:', {
         messageId: messageRecord.id,
         to,
         phoneId,
-        note: 'Real ChatFlow integration pending correct endpoint'
+        evolutionInstance: phone.evolution_name
       });
       
       res.status(201).json({
@@ -160,7 +150,7 @@ class MessageController {
           to: to,
           content: content,
           status: 'sent',
-          createdAt: message.created_at
+          createdAt: messageRecord.created_at
         }
       });
       

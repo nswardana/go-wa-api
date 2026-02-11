@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { socket } from '../services/api';
 import {
   Box,
   Paper,
@@ -20,9 +21,15 @@ import {
   Edit,
   Delete,
   QrCode,
+  Link,
+  LinkOff,
+  Visibility,
+  VisibilityOff,
+  ContentCopy,
 } from '@mui/icons-material';
 import { DataGrid } from '@mui/x-data-grid';
 import { phonesAPI } from '../services/api';
+import QRCodeModal from '../components/QRCodeModal';
 
 const Phones = () => {
   const [phones, setPhones] = useState([]);
@@ -44,6 +51,7 @@ const Phones = () => {
   const [qrSource, setQrSource] = useState('');
   const [qrLoading, setQrLoading] = useState(false);
   const [selectedPhone, setSelectedPhone] = useState(null);
+  const [tokenVisibility, setTokenVisibility] = useState({});
 
   // Auto-refresh status every 30 seconds
   useEffect(() => {
@@ -59,6 +67,39 @@ const Phones = () => {
   useEffect(() => {
     fetchPhones();
   }, []);
+
+  // WebSocket listener for real-time updates
+  useEffect(() => {
+    socket.on('phone-status-update', (data) => {
+      console.log('Phone status update received:', data);
+      
+      // Update phone list
+      setPhones(prevPhones => 
+        prevPhones.map(p => 
+          p.id === data.phoneId 
+            ? { ...p, is_connected: data.isConnected, last_seen: data.timestamp }
+            : p
+        )
+      );
+      
+      // Close QR modal if connected
+      if (data.isConnected && qrDialogOpen) {
+        setQrDialogOpen(false);
+        setSelectedPhone(null);
+        setSuccess('Phone connected successfully!');
+      }
+    });
+
+    // Join user room for personalized updates
+    const user = JSON.parse(localStorage.getItem('user') || '{}');
+    if (user.id) {
+      socket.emit('join-user-room', user.id);
+    }
+
+    return () => {
+      socket.off('phone-status-update');
+    };
+  }, [qrDialogOpen]);
 
   const fetchPhones = async () => {
     try {
@@ -97,6 +138,23 @@ const Phones = () => {
     } catch (error) {
       setError(error.response?.data?.error || 'Operation failed');
     }
+  };
+
+  const toggleTokenVisibility = (phoneId) => {
+    setTokenVisibility(prev => ({
+      ...prev,
+      [phoneId]: !prev[phoneId]
+    }));
+  };
+
+  const handleCopyToClipboard = (text, label) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setSuccess(`${label} copied to clipboard`);
+      setTimeout(() => setSuccess(''), 3000);
+    }).catch(() => {
+      setError('Failed to copy to clipboard');
+      setTimeout(() => setError(''), 3000);
+    });
   };
 
   const handleEdit = (phone) => {
@@ -141,14 +199,6 @@ const Phones = () => {
         setQrCode(response.data.qrCode);
         setQrSource(response.data.source);
         setQrDialogOpen(true);
-        console.log('Dialog should open now');
-        console.log('QR Dialog State:', qrDialogOpen);
-        
-        // Force dialog open with timeout
-        setTimeout(() => {
-          console.log('Force opening dialog...');
-          setQrDialogOpen(true);
-        }, 100);
 
         // Refresh phone status after QR generation
         await refreshPhoneStatus(phone.id);
@@ -172,6 +222,12 @@ const Phones = () => {
     fetchPhones();
   };
 
+  const handleRefreshQR = async () => {
+    if (selectedPhone) {
+      await handleGenerateQR(selectedPhone);
+    }
+  };
+
   const refreshPhoneStatus = async (phoneId) => {
     try {
       const response = await phonesAPI.getPhoneStatus(phoneId);
@@ -190,36 +246,170 @@ const Phones = () => {
     }
   };
 
+  const handleConnectDisconnect = async (phone) => {
+    try {
+      setError('');
+      setSuccess('');
+      
+      if (phone.is_connected) {
+        // Disconnect phone
+        const response = await phonesAPI.disconnectPhone(phone.id);
+        if (response.data.success) {
+          setSuccess(`${phone.device_name} disconnected successfully`);
+          // Update phone status
+          setPhones(prevPhones => 
+            prevPhones.map(p => 
+              p.id === phone.id 
+                ? { ...p, is_connected: false }
+                : p
+            )
+          );
+        } else {
+          setError(response.data.message || 'Failed to disconnect phone');
+        }
+      } else {
+        // Connect phone - generate QR code
+        await handleGenerateQR(phone);
+      }
+    } catch (error) {
+      setError(error.response?.data?.message || 'Failed to connect/disconnect phone');
+    }
+  };
+
   const columns = [
     { field: 'id', headerName: 'ID', width: 80 },
-    { field: 'phone_number', headerName: 'Phone Number', width: 150 },
-    { field: 'device_name', headerName: 'Device Name', width: 150 },
-    {
-      field: 'is_connected',
-      headerName: 'Status',
+    { 
+      field: 'phone_number', 
+      headerName: 'Phone Number', 
+      width: 150,
+      renderCell: (params) => (
+        <Box>
+          <Typography variant="body2" sx={{ fontWeight: 'medium' }}>
+            {params.value}
+          </Typography>
+        </Box>
+      )
+    },
+    { 
+      field: 'device_name', 
+      headerName: 'Device Name', 
+      width: 150,
+      renderCell: (params) => (
+        <Box>
+          <Typography variant="body2" sx={{ fontWeight: 'medium' }}>
+            {params.value}
+          </Typography>
+        </Box>
+      )
+    },
+    { 
+      field: 'token', 
+      headerName: 'Number Key', 
+      width: 300,
+      renderCell: (params) => (
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 1 }}>
+          <TextField
+            size="small"
+            value={tokenVisibility[params.row.id] ? params.value : '•••••••••••••••••••••••••••••••'}
+            type={tokenVisibility[params.row.id] ? 'text' : 'password'}
+            variant="outlined"
+            sx={{ 
+              '& .MuiOutlinedInput-root': {
+                borderRadius: 1,
+                '& fieldset': {
+                  border: 'none',
+                },
+                '& input': {
+                  padding: '8px 12px',
+                  fontFamily: 'monospace',
+                  fontSize: '0.75rem'
+                }
+              }
+            }}
+            InputProps={{
+              readOnly: true,
+              endAdornment: (
+                <Box display="flex" gap={0.5}>
+                  <IconButton 
+                    size="small" 
+                    onClick={() => toggleTokenVisibility(params.row.id)}
+                    sx={{ padding: 0.5 }}
+                  >
+                    {tokenVisibility[params.row.id] ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}
+                  </IconButton>
+                  <IconButton 
+                    size="small" 
+                    onClick={() => handleCopyToClipboard(params.value, 'Number Key')}
+                    sx={{ padding: 0.5 }}
+                  >
+                    <ContentCopy fontSize="small" />
+                  </IconButton>
+                </Box>
+              )
+            }}
+          />
+        </Box>
+      )
+    },
+    { 
+      field: 'evolution_name', 
+      headerName: 'Instance', 
       width: 120,
       renderCell: (params) => (
-        <Chip
-          label={params.value ? 'Connected' : 'Disconnected'}
-          color={params.value ? 'success' : 'default'}
-          size="small"
+        <Chip 
+          label={params.value || 'N/A'} 
+          size="small" 
+          color="primary" 
+          variant="outlined"
         />
-      ),
+      )
     },
-    { field: 'webhook_url', headerName: 'Webhook URL', width: 200 },
+    { 
+      field: 'is_connected', 
+      headerName: 'Status', 
+      width: 120,
+      renderCell: (params) => (
+        <Chip 
+          label={params.value ? 'Connected' : 'Disconnected'} 
+          color={params.value ? 'success' : 'default'} 
+          size="small" 
+        />
+      )
+    },
     {
       field: 'actions',
       headerName: 'Actions',
       width: 200,
       renderCell: (params) => (
         <Box>
-          <IconButton onClick={() => handleEdit(params.row)} size="small">
-            <Edit />
+          <IconButton
+            onClick={() => handleConnectDisconnect(params.row)}
+            color={params.row.is_connected ? 'error' : 'success'}
+            title={params.row.is_connected ? 'Disconnect' : 'Connect'}
+          >
+            {params.row.is_connected ? <LinkOff /> : <Link />}
           </IconButton>
-          <IconButton onClick={() => handleGenerateQR(params.row)} size="small" color="primary">
+          <IconButton
+            onClick={() => handleGenerateQR(params.row)}
+            color="primary"
+            title="Generate QR Code"
+            disabled={qrLoading}
+          >
+            
             <QrCode />
           </IconButton>
-          <IconButton onClick={() => handleDelete(params.row.id)} size="small" color="error">
+          <IconButton
+            onClick={() => handleEdit(params.row.id)}
+            color="info"
+            title="Edit"
+          >
+            <Edit />
+          </IconButton>
+          <IconButton
+            onClick={() => handleDelete(params.row.id)}
+            color="error"
+            title="Delete"
+          >
             <Delete />
           </IconButton>
         </Box>
@@ -311,82 +501,19 @@ const Phones = () => {
         </form>
       </Dialog>
 
-      {/* QR Code Dialog */}
-      <Dialog 
-        open={qrDialogOpen} 
+      {/* QR Code Modal */}
+      <QRCodeModal
+        open={qrDialogOpen}
         onClose={handleQrDialogClose}
-        maxWidth="sm"
-        fullWidth
-      >
-        <DialogTitle>QR Code for {selectedPhone?.device_name}</DialogTitle>
-        <DialogContent>
-          <Typography variant="body1" gutterBottom>
-            Scan this QR code with your WhatsApp device to connect {selectedPhone?.device_name}
-          </Typography>
-          {qrLoading ? (
-            <Box display="flex" justifyContent="center" alignItems="center" p={3}>
-              <CircularProgress />
-            </Box>
-          ) : qrCode ? (
-            <Box display="flex" justifyContent="center" alignItems="center" p={2}>
-              {/* Use real QR code image */}
-              <img 
-                src={qrCode}
-                alt="QR Code" 
-                style={{ maxWidth: '300px', height: 'auto', border: '2px solid', backgroundColor: '#fff' }}
-                onLoad={() => console.log('Real QR Code image loaded successfully')}
-                onError={(e) => {
-                  console.error('Real QR Code image failed to load:', e);
-                  console.error('Image src:', qrCode);
-                  console.error('Error details:', e.target.error);
-                }}
-              />
-              <Typography variant="caption" display="block" textAlign="center" mt={1}>
-                {qrSource === 'chatflow-real' ? 
-                  '🟢 Real WhatsApp QR Code (ChatFlow)' : 
-                  qrSource === 'mock-with-instructions' ?
-                  '🟡 Mock QR - Use ChatFlow Web Interface' :
-                  qrSource === 'real-whatsapp-format' ?
-                  '🔵 Real WhatsApp QR Code (Scanable)' :
-                  '🟡 Mock QR Code (Development Mode)'
-                }
-              </Typography>
-              {qrSource === 'mock-with-instructions' && (
-                <Typography variant="body2" color="info" sx={{ mt: 1, p: 1, bgcolor: 'info.light', borderRadius: 1 }}>
-                  <strong>For Real WhatsApp QR:</strong><br />
-                  1. Open <a href="http://localhost:8081" target="_blank" rel="noopener">ChatFlow Web Interface</a><br />
-                  2. Login: admin / admin<br />
-                  3. Create Instance: "Nanang"<br />
-                  4. Generate QR and scan with WhatsApp
-                </Typography>
-              )}
-            </Box>
-          ) : (
-            <Box display="flex" justifyContent="center" alignItems="center" p={2}>
-              {qrSource === 'chatflow' ? (
-                <>
-                  <Typography variant="h6" color="success.main" sx={{ mb: 2 }}>
-                    🟢 Device Already Connected
-                  </Typography>
-                  <Typography variant="body1" sx={{ mb: 1 }}>
-                    Device "{selectedPhone?.device_name}" is already connected to WhatsApp
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    No QR code needed. You can start sending messages.
-                  </Typography>
-                </>
-              ) : (
-                <Typography variant="body2" color="error">
-                  Failed to generate QR code
-                </Typography>
-              )}
-            </Box>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={handleQrDialogClose}>Close</Button>
-        </DialogActions>
-      </Dialog>
+        qrCode={qrCode}
+        qrSource={qrSource}
+        loading={qrLoading}
+        deviceName={selectedPhone?.device_name}
+        serverId="CHATFLOW"
+        onRefresh={handleRefreshQR}
+        error={error}
+        connected={selectedPhone?.is_connected}
+      />
     </Box>
   );
 };

@@ -1,12 +1,16 @@
 const { Pool } = require('pg');
 const evolutionService = require('../services/evolutionService');
 
+// Evolution Service Configuration
+const EVOLUTION_SERVICE_API_KEY = process.env.EVOLUTION_SERVICE_API_KEY;
+const EVOLUTION_API_URL = process.env.EVOLUTION_API_URL;
+
 // Database connection
 const pool = new Pool({
-  host: 'postgres',
-  port: 5432,
-  database: process.env.DB_NAME || 'evolution_api',
-  user: process.env.DB_USER || 'evolution_user',
+  host: process.env.DB_HOST || 'localhost',
+  port: process.env.DB_PORT || 5432,
+  database: process.env.DB_NAME || 'chatflow_api',
+  user: process.env.DB_USER || 'chatflow_user',
   password: process.env.DB_PASSWORD || 'Bismillah313!',
 });
 
@@ -63,10 +67,9 @@ class UserMessageController {
 
       // Find phone number by number_key and user_id
       const phoneQuery = `
-        SELECT p.*, e.name as evolution_name, e.url as evolution_url, e.token as evolution_token
+        SELECT p.*, 'chatflow-1' as evolution_name
         FROM phone_numbers p
-        LEFT JOIN evolution_instances e ON p.evolution_instance_id = e.id
-        WHERE p.number_key = $1 AND p.user_id = $2 AND p.is_active = true
+        WHERE p.token = $1 AND p.user_id = $2
       `;
       const phoneResult = await pool.query(phoneQuery, [number_key, user.id]);
 
@@ -82,7 +85,7 @@ class UserMessageController {
       const phone = phoneResult.rows[0];
 
       // Check if phone is connected
-      if (phone.status !== 'connected') {
+      if (phone.is_connected !== 'connected') {
         return res.status(200).json({
           status: false,
           code: 900,
@@ -187,8 +190,8 @@ class UserMessageController {
       const phoneQuery = `
         SELECT p.*, e.name as evolution_name, e.url as evolution_url, e.token as evolution_token
         FROM phone_numbers p
-        LEFT JOIN evolution_instances e ON p.evolution_instance_id = e.id
-        WHERE p.number_key = $1 AND p.user_id = $2 AND p.is_active = true
+        "chatflow-1" as evolution_name
+        WHERE p.token = $1 AND p.user_id = $2 
       `;
       const phoneResult = await pool.query(phoneQuery, [number_key, user.id]);
 
@@ -204,7 +207,7 @@ class UserMessageController {
       const phone = phoneResult.rows[0];
 
       // Check if phone is connected
-      if (phone.status !== 'connected') {
+      if (phone.is_connected !== 'connected') {
         return res.status(200).json({
           status: false,
           code: 900,
@@ -224,12 +227,12 @@ class UserMessageController {
 
       let sendResult;
       if (phone.evolution_name === 'chatflow-1') {
-        sendResult = await evolutionService.sendGroupMessage('chatflow-1', evolutionData);
+        sendResult = await await evolutionService.sendGroupMessage('chatflow-1', evolutionData);
       } else if (phone.evolution_name === 'chatflow-2') {
-        sendResult = await evolutionService.sendGroupMessage('chatflow-2', evolutionData);
+        sendResult = await await evolutionService.sendGroupMessage('chatflow-2', evolutionData);
       } else {
         // Fallback to default
-        sendResult = await evolutionService.sendGroupMessage('chatflow-1', evolutionData);
+        sendResult = await await evolutionService.sendGroupMessage('chatflow-1', evolutionData);
       }
 
       // Store message in database
@@ -309,8 +312,8 @@ class UserMessageController {
       const phoneQuery = `
         SELECT p.*, e.name as evolution_name, e.url as evolution_url, e.token as evolution_token
         FROM phone_numbers p
-        LEFT JOIN evolution_instances e ON p.evolution_instance_id = e.id
-        WHERE p.number_key = $1 AND p.user_id = $2 AND p.is_active = true
+        "chatflow-1" as evolution_name
+        WHERE p.token = $1 AND p.user_id = $2 
       `;
       const phoneResult = await pool.query(phoneQuery, [number_key, user.id]);
 
@@ -394,8 +397,8 @@ class UserMessageController {
       const phoneQuery = `
         SELECT p.*, e.name as evolution_name, e.url as evolution_url, e.token as evolution_token
         FROM phone_numbers p
-        LEFT JOIN evolution_instances e ON p.evolution_instance_id = e.id
-        WHERE p.number_key = $1 AND p.user_id = $2 AND p.is_active = true
+        "chatflow-1" as evolution_name
+        WHERE p.token = $1 AND p.user_id = $2 
       `;
       const phoneResult = await pool.query(phoneQuery, [number_key, user.id]);
 
@@ -489,8 +492,8 @@ class UserMessageController {
       const phoneQuery = `
         SELECT p.*, e.name as evolution_name, e.url as evolution_url, e.token as evolution_token
         FROM phone_numbers p
-        LEFT JOIN evolution_instances e ON p.evolution_instance_id = e.id
-        WHERE p.number_key = $1 AND p.user_id = $2 AND p.is_active = true
+        "chatflow-1" as evolution_name
+        WHERE p.token = $1 AND p.user_id = $2 
       `;
       const phoneResult = await pool.query(phoneQuery, [number_key, user.id]);
 

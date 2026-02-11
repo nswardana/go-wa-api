@@ -13,6 +13,10 @@ import Users from './pages/Users';
 import Settings from './pages/Settings';
 import ExternalWhatsApp from './pages/ExternalWhatsApp';
 import ApiKeys from './pages/ApiKeys';
+import Contacts from './pages/Contacts';
+import Broadcasts from './pages/Broadcasts';
+import BroadcastDetails from './pages/BroadcastDetails';
+import AutoReply from './pages/AutoReply';
 import Layout from './components/Layout';
 import PrivateRoute from './components/PrivateRoute';
 
@@ -33,6 +37,11 @@ function App() {
               <Route path="dashboard" element={<Dashboard />} />
               <Route path="phones" element={<Phones />} />
               <Route path="messages" element={<Messages />} />
+              <Route path="contacts" element={<Contacts />} />
+              <Route path="broadcasts" element={<Broadcasts />} />
+              <Route path="broadcasts/create" element={<Broadcasts />} />
+              <Route path="broadcasts/:id" element={<BroadcastDetails />} />
+              <Route path="auto-reply" element={<AutoReply />} />
               <Route path="templates" element={<Templates />} />
               <Route path="schedules" element={<Schedules />} />
               <Route path="external-whatsapp" element={<ExternalWhatsApp />} />

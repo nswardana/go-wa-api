@@ -64,7 +64,23 @@ class PhoneController {
       
       res.json({
         success: true,
-        phone
+        phone: {
+          id: phone.id,
+          phoneNumber: phone.phone_number,
+          deviceName: phone.device_name,
+          token: phone.token,
+          webhookUrl: phone.webhook_url,
+          webhookSecret: phone.webhook_secret,
+          instance: 'chatflow-1',
+          evolutionName: 'chatflow-1',
+          isConnected: phone.is_connected,
+          lastSeen: phone.last_seen,
+          autoReply: phone.auto_reply,
+          autoMarkRead: phone.auto_mark_read,
+          autoDownloadMedia: phone.auto_download_media,
+          createdAt: phone.created_at,
+          updatedAt: phone.updated_at
+        }
       });
       
     } catch (error) {
@@ -98,6 +114,10 @@ class PhoneController {
         });
       }
       
+      // Select instance based on round-robin or load balancing
+      const instances = ['chatflow-1', 'chatflow-2'];
+      const selectedInstance = instances[currentPhones % instances.length];
+      
       const token = 'token_' + uuidv4().replace(/-/g, '');
       const webhookSecretFinal = webhookSecret || 'webhook_' + uuidv4();
       
@@ -117,13 +137,14 @@ class PhoneController {
           phoneNumber: phone.phone_number,
           webhookUrl: phone.webhook_url,
           webhookSecret: phone.webhook_secret,
-          token: phone.token
+          token: phone.token,
+          instanceName: selectedInstance
         });
       } catch (error) {
         logger.warn('Failed to create ChatFlow instance:', error.message);
       }
       
-      logger.info('Phone created: ' + phone.id + ' for user ' + userId);
+      logger.info('Phone created: ' + phone.id + ' for user ' + userId + ' on instance: ' + selectedInstance);
       
       res.status(201).json({
         success: true,
@@ -135,6 +156,8 @@ class PhoneController {
           token: phone.token,
           webhookUrl: phone.webhook_url,
           webhookSecret: phone.webhook_secret,
+          instance: selectedInstance,
+          evolutionName: 'chatflow-1',
           isConnected: false,
           autoReply: null,
           autoMarkRead: false,
@@ -159,7 +182,7 @@ class PhoneController {
       const { phoneNumber, deviceName, webhookUrl, webhookSecret } = req.body;
       
       // Check if phone belongs to user
-      const checkQuery = 'SELECT id FROM phone_numbers ' +
+      const checkQuery = 'SELECT * FROM phone_numbers ' +
                        'WHERE id = $1 AND user_id = $2';
       
       const existingPhoneResult = await db.query(checkQuery, [phoneId, userId]);
@@ -193,6 +216,8 @@ class PhoneController {
           token: phone.token,
           webhookUrl: phone.webhook_url,
           webhookSecret: phone.webhook_secret,
+          instance: 'chatflow-1',
+          evolutionName: 'chatflow-1',
           isConnected: phone.is_connected,
           autoReply: phone.auto_reply,
           autoMarkRead: phone.auto_mark_read,
@@ -228,10 +253,24 @@ class PhoneController {
         });
       }
       
-      const query = 'DELETE FROM phone_numbers ' +
-                   'WHERE id = $1 AND user_id = $2';
+      // Delete in correct order to handle foreign key constraints:
+      // 1. Delete auto_reply_logs first
+      await db.query(`
+        DELETE FROM auto_reply_logs 
+        WHERE session_id IN (
+          SELECT id FROM auto_reply_sessions 
+          WHERE phone_number_id = $1
+        )
+      `, [phoneId]);
       
-      await db.query(query, [phoneId, userId]);
+      // 2. Delete auto_reply_sessions
+      await db.query('DELETE FROM auto_reply_sessions WHERE phone_number_id = $1', [phoneId]);
+      
+      // 3. Delete incoming_messages
+      await db.query('DELETE FROM incoming_messages WHERE phone_id = $1', [phoneId]);
+      
+      // 4. Delete phone number
+      await db.query('DELETE FROM phone_numbers WHERE id = $1 AND user_id = $2', [phoneId, userId]);
       
       logger.info('Phone deleted: ' + phoneId);
       
@@ -253,8 +292,9 @@ class PhoneController {
     try {
       const { phoneId } = req.params;
       const userId = req.user.id;
+      const { force } = req.query; // Add force parameter
       
-      logger.info('Generating QR for phoneId:', phoneId, 'userId:', userId);
+      logger.info('Generating QR for phoneId:', phoneId, 'userId:', userId, 'force:', force);
       
       // Check if phone belongs to user
       const checkQuery = 'SELECT * FROM phone_numbers ' +
@@ -272,8 +312,8 @@ class PhoneController {
       
       logger.info('Found phone:', { phoneId: phone.id, deviceName: phone.device_name });
       
-      // Generate QR code using ChatFlow service
-      const qrResult = await evolutionService.generateQR(phoneId);
+      // Generate QR code using ChatFlow service with force option
+      const qrResult = await evolutionService.generateQR(phoneId, force === 'true');
       
       if (qrResult.success) {
         logger.info('QR code generated successfully for phone:', phoneId);
@@ -377,6 +417,60 @@ class PhoneController {
     }
   }
 
+  // Disconnect phone
+  async disconnectPhone(req, res) {
+    try {
+      const { phoneId } = req.params;
+      const userId = req.user.id;
+      
+      logger.info('Disconnecting phone:', phoneId, 'userId:', userId);
+      
+      // Check if phone belongs to user
+      const checkQuery = 'SELECT * FROM phone_numbers ' +
+                       'WHERE id = $1 AND user_id = $2';
+      
+      const phoneResult = await db.query(checkQuery, [phoneId, userId]);
+      const phone = phoneResult.rows[0];
+      
+      if (!phone) {
+        logger.error('Phone not found for disconnect:', { phoneId, userId });
+        return res.status(404).json({
+          error: 'Phone not found'
+        });
+      }
+      
+      // Disconnect using ChatFlow service
+      const disconnectResult = await evolutionService.disconnectPhone(phoneId);
+      
+      // Update database status
+      const updateQuery = 'UPDATE phone_numbers ' +
+                       'SET is_connected = false, last_seen = NULL, qr_code = NULL, session_data = NULL, updated_at = CURRENT_TIMESTAMP ' +
+                       'WHERE id = $1 AND user_id = $2';
+      
+      await db.query(updateQuery, [phoneId, userId]);
+      
+      logger.info('Phone disconnected successfully:', phoneId);
+      
+      res.json({
+        success: true,
+        message: 'Phone disconnected successfully',
+        phoneId: phoneId,
+        deviceName: phone.device_name
+      });
+      
+    } catch (error) {
+      logger.error('Disconnect phone error:', {
+        error: error.message,
+        stack: error.stack,
+        phoneId: req.params.phoneId
+      });
+      res.status(500).json({
+        error: 'Internal server error',
+        message: 'Failed to disconnect phone: ' + error.message
+      });
+    }
+  }
+
   // Get connection status for phone
   async getConnectionStatus(req, res) {
     try {
@@ -402,6 +496,8 @@ class PhoneController {
           id: phone.id,
           phoneNumber: phone.phone_number,
           deviceName: phone.device_name,
+          instance: 'chatflow-1',
+          evolutionName: 'chatflow-1',
           isConnected: phone.is_connected || false,
           lastSeen: phone.last_seen
         }

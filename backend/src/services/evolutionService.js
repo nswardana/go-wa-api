@@ -1,6 +1,7 @@
 const { Pool } = require('pg');
 const axios = require('axios');
 const logger = require('../utils/logger');
+const autoReplyService = require('./autoReplyService');
 
 // Use shared database configuration
 const { db } = require('../config/database');
@@ -10,21 +11,24 @@ class EvolutionService {
     // Check if running in development mode
     const isDevelopment = process.env.NODE_ENV === 'development';
     
+    // Evolution Service API Key for service-to-service authentication
+    this.evolutionServiceApiKey = process.env.EVOLUTION_SERVICE_API_KEY;
+    
     // Multiple ChatFlow instances
     this.instances = {
       'chatflow-1': {
         url: isDevelopment ? 'http://localhost:8081' : 'http://chatflow-1:3000',
-        apiKey: process.env.EVOLUTION_API_KEY_1 || 'admin'
+        apiKey: this.evolutionServiceApiKey
       },
       'chatflow-2': {
         url: isDevelopment ? 'http://localhost:8082' : 'http://chatflow-2:3000',
-        apiKey: process.env.EVOLUTION_API_KEY_2 || 'admin'
+        apiKey: this.evolutionServiceApiKey
       }
     };
     
     // Default instance
     this.evolutionApiUrl = isDevelopment ? 'http://localhost:8081' : process.env.EVOLUTION_API_URL || 'http://chatflow-1:3000';
-    this.evolutionApiKey = process.env.EVOLUTION_API_KEY || 'admin';
+    this.evolutionApiKey = this.evolutionServiceApiKey;
     
     // For frontend access, use localhost:8081 in development
     this.evolutionApiPublicUrl = isDevelopment ? 'http://localhost:8081' : 'http://localhost:8081';
@@ -45,7 +49,7 @@ class EvolutionService {
       const response = await axios.post(`${this.evolutionApiUrl}/devices`, {
         device_id: phoneData.deviceName,
         number: phoneData.phoneNumber,
-        webhook: phoneData.webhookUrl,
+        webhook: `http://localhost:8090/webhook/evolution`,
         webhook_secret: phoneData.webhookSecret
       }, {
         headers: {
@@ -79,9 +83,9 @@ class EvolutionService {
   }
 
   // Generate QR code for existing instance
-  async generateQR(phoneId) {
+  async generateQR(phoneId, forceGenerate = false) {
     try {
-      logger.info('Starting QR generation for phoneId:', phoneId);
+      logger.info('Starting QR generation for phoneId:', phoneId, 'forceGenerate:', forceGenerate);
       
       // Get phone details from database
       const phoneQuery = 'SELECT * FROM phone_numbers WHERE id = $1';
@@ -97,7 +101,7 @@ class EvolutionService {
         };
       }
 
-      logger.info('Found phone:', { phoneId: phone.id, deviceName: phone.device_name });
+      logger.info('Found phone:', { phoneId: phone.id, deviceName: phone.device_name, isConnected: phone.is_connected });
 
       // Check if ChatFlow is available
       const evolutionInstance = phone.evolution_name || 'chatflow-1';
@@ -146,21 +150,61 @@ class EvolutionService {
             logger.info('Device created successfully, retrying QR generation');
             
             // Retry QR generation after device creation
-            return await this.generateQR(phoneId);
+            return await this.generateQR(phoneId, forceGenerate);
           } else {
             logger.error('Failed to create device:', createResult.message);
             throw new Error(createResult.message);
           }
         }
 
+        // Check for direct ALREADY_LOGGED_IN response
+        if (loginResponse.data?.code === 'ALREADY_LOGGED_IN' ||
+            loginResponse.data?.message?.includes('already logged in')) {
+          
+          // Update database status to connected
+          await db.query(
+            'UPDATE phone_numbers SET is_connected = true, qr_code = NULL, updated_at = NOW() WHERE id = $1',
+            [phoneId]
+          );
+          
+          return {
+            success: true,
+            qrCode: null,
+            message: 'Device is already logged in to WhatsApp',
+            status: 'connected',
+            phoneId: phoneId,
+            deviceName: phone.device_name,
+            phoneNumber: phone.phone_number,
+            evolutionApiUrl: instanceConfig.url,
+            source: 'chatflow'
+          };
+        }
+
         // Check if QR code is available
         if (loginResponse.data && loginResponse.data.code === 'SUCCESS') {
           const qrData = loginResponse.data.results;
           
+          // Check for QR code in multiple possible fields
+          let qrCodePath = null;
+          
           if (qrData && qrData.qrcode) {
-            // QR code path from API
-            const qrCodePath = qrData.qrcode; // e.g., "/statics/qrcode/scan-qr-{UUID}.png"
-            const fullQrUrl = `${instanceConfig.url}${qrCodePath}`;
+            qrCodePath = qrData.qrcode;
+          } else if (qrData && qrData.qr_link) {
+            qrCodePath = qrData.qr_link;
+          } else if (qrData && qrData.qr_code) {
+            qrCodePath = qrData.qr_code;
+          }
+          
+          if (qrCodePath) {
+            // Handle both relative and absolute URLs
+            let fullQrUrl;
+            if (qrCodePath.startsWith('http')) {
+              // Absolute URL
+              fullQrUrl = qrCodePath;
+            } else {
+              // Relative path - prepend instance URL
+              fullQrUrl = `${instanceConfig.url}${qrCodePath}`;
+            }
             
             // Update phone with QR code URL
             const updateQuery = 'UPDATE phone_numbers SET qr_code = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2';
@@ -176,7 +220,7 @@ class EvolutionService {
             return {
               success: true,
               qrCode: fullQrUrl,
-              qrCodeBase64: qrData.qrcode_base64 || null, // If API provides base64
+              qrCodeBase64: qrData.qrcode_base64 || null,
               message: 'QR code generated successfully',
               phoneId: phoneId,
               deviceName: phone.device_name,
@@ -184,16 +228,17 @@ class EvolutionService {
               evolutionApiUrl: instanceConfig.url,
               source: 'chatflow'
             };
-          } else if (qrData && qrData.message) {
-            // Already logged in or other status
+          } else {
+            // No QR code found - device might be connected
             return {
               success: true,
               qrCode: null,
-              message: qrData.message,
-              status: qrData.status || 'connected',
+              message: 'No QR code available. Device may already be connected.',
+              status: 'check_connection',
               phoneId: phoneId,
               deviceName: phone.device_name,
               phoneNumber: phone.phone_number,
+              evolutionApiUrl: instanceConfig.url,
               source: 'chatflow'
             };
           }
@@ -206,7 +251,20 @@ class EvolutionService {
           // Check if device is already connected
           if (loginResponse.data.results.connected === true || 
               loginResponse.data.results.status === 'CONNECTED' ||
-              loginResponse.data.results.message?.includes('already connected')) {
+              loginResponse.data.results.message?.includes('already connected') ||
+              loginResponse.data.results.message?.includes('already logged in')) {
+            
+            if (forceGenerate) {
+              // Force disconnect first, then generate QR
+              logger.info('Force generating QR - disconnecting first');
+              await this.disconnectPhone(phoneId);
+              
+              // Wait a moment for disconnection to complete
+              await new Promise(resolve => setTimeout(resolve, 2000));
+              
+              // Retry QR generation
+              return await this.generateQR(phoneId, false);
+            }
             
             return {
               success: true,
@@ -219,6 +277,39 @@ class EvolutionService {
               evolutionApiUrl: instanceConfig.url,
               source: 'chatflow'
             };
+          }
+          
+          // Handle "already logged in" case
+          if (loginResponse.data.results.message?.includes('already logged in')) {
+            // Update database status to connected
+            await db.query(
+              'UPDATE phone_numbers SET is_connected = true, qr_code = NULL, updated_at = NOW() WHERE id = $1',
+              [phoneId]
+            );
+            
+            return {
+              success: true,
+              qrCode: null,
+              message: 'Device is already logged in to WhatsApp',
+              status: 'connected',
+              phoneId: phoneId,
+              deviceName: phone.device_name,
+              phoneNumber: phone.phone_number,
+              evolutionApiUrl: instanceConfig.url,
+              source: 'chatflow'
+            };
+          }
+          
+          if (forceGenerate) {
+            // Force disconnect first, then generate QR
+            logger.info('Force generating QR - disconnecting first');
+            await this.disconnectPhone(phoneId);
+            
+            // Wait a moment for disconnection to complete
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // Retry QR generation
+            return await this.generateQR(phoneId, false);
           }
           
           return {
@@ -257,8 +348,31 @@ class EvolutionService {
 
           if (createResult.success) {
             // Retry getting QR code
-            return await this.generateQR(phoneId);
+            return await this.generateQR(phoneId, forceGenerate);
           }
+        }
+
+        // Check for ALREADY_LOGGED_IN in error response
+        if (evolutionError.response?.data?.code === 'ALREADY_LOGGED_IN' ||
+            evolutionError.response?.data?.message?.includes('already logged in')) {
+          
+          // Update database status to connected
+          await db.query(
+            'UPDATE phone_numbers SET is_connected = true, qr_code = NULL, updated_at = NOW() WHERE id = $1',
+            [phoneId]
+          );
+          
+          return {
+            success: true,
+            qrCode: null,
+            message: 'Device is already logged in to WhatsApp',
+            status: 'connected',
+            phoneId: phoneId,
+            deviceName: phone.device_name,
+            phoneNumber: phone.phone_number,
+            evolutionApiUrl: instanceConfig.url,
+            source: 'chatflow'
+          };
         }
 
         return {
@@ -288,6 +402,104 @@ class EvolutionService {
       return {
         success: false,
         message: 'Failed to generate QR code: ' + error.message,
+        phoneId
+      };
+    }
+  }
+
+  // Disconnect phone from WhatsApp
+  async disconnectPhone(phoneId) {
+    try {
+      logger.info('Disconnecting phone:', phoneId);
+      
+      // Get phone details from database
+      const phoneQuery = 'SELECT * FROM phone_numbers WHERE id = $1';
+      const phoneResult = await db.query(phoneQuery, [phoneId]);
+      const phone = phoneResult.rows[0];
+
+      if (!phone) {
+        logger.error('Phone not found for disconnect:', phoneId);
+        return {
+          success: false,
+          message: 'Phone not found',
+          phoneId
+        };
+      }
+
+      logger.info('Found phone for disconnect:', { phoneId: phone.id, deviceName: phone.device_name });
+
+      // Get instance configuration
+      const evolutionInstance = phone.evolution_name || 'chatflow-1';
+      const instanceConfig = this.getInstanceConfig(evolutionInstance);
+      
+      try {
+        logger.info('Disconnecting from ChatFlow:', {
+          evolutionInstance,
+          url: instanceConfig.url,
+          deviceName: phone.device_name
+        });
+        
+        // Call ChatFlow logout endpoint
+        const logoutResponse = await axios.post(
+          `${instanceConfig.url}/app/logout`,
+          {
+            device_id: phone.device_name
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Basic ${Buffer.from('admin:admin').toString('base64')}`
+            },
+            timeout: 15000
+          }
+        );
+
+        logger.info('Logout response:', logoutResponse.data);
+
+        // Update database status
+        const updateQuery = 'UPDATE phone_numbers SET is_connected = false, last_seen = NULL, qr_code = NULL, session_data = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1';
+        await db.query(updateQuery, [phoneId]);
+
+        logger.info('Phone disconnected successfully:', phoneId);
+
+        return {
+          success: true,
+          message: 'Phone disconnected successfully',
+          phoneId: phoneId,
+          deviceName: phone.device_name
+        };
+
+      } catch (evolutionError) {
+        logger.warn('ChatFlow disconnect error:', {
+          error: evolutionError.message,
+          response: evolutionError.response?.data,
+          evolutionInstance,
+          phoneId
+        });
+
+        // Even if ChatFlow API fails, update database to disconnected state
+        const updateQuery = 'UPDATE phone_numbers SET is_connected = false, last_seen = NULL, qr_code = NULL, session_data = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1';
+        await db.query(updateQuery, [phoneId]);
+
+        return {
+          success: true,
+          message: 'Phone disconnected (database updated)',
+          phoneId: phoneId,
+          deviceName: phone.device_name,
+          warning: 'ChatFlow API disconnect failed, but database updated'
+        };
+      }
+
+    } catch (error) {
+      logger.error('Failed to disconnect phone:', {
+        error: error.message,
+        stack: error.stack,
+        phoneId
+      });
+      
+      return {
+        success: false,
+        message: 'Failed to disconnect phone: ' + error.message,
         phoneId
       };
     }
@@ -364,16 +576,19 @@ class EvolutionService {
       const evolutionInstance = phone.evolution_name || 'chatflow-1';
       const instanceConfig = this.getInstanceConfig(evolutionInstance);
 
-      // Use POST /send endpoint with device_id query parameter
+      // Use POST /send/message endpoint with X-Device-Id header
       const response = await axios.post(
-        `${instanceConfig.url}/send?device_id=${phone.device_name}`,
+        `${instanceConfig.url}/send/message`,
         {
-          number: messageData.to,
-          message: messageData.content
+          phone: `${messageData.to}@s.whatsapp.net`,
+          message: messageData.message || messageData.content,
+          is_forwarded: false
         },
         {
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'Authorization': `Basic ${Buffer.from('admin:admin').toString('base64')}`,
+            'X-Device-Id': phone.device_name
           },
           timeout: 30000
         }
@@ -392,7 +607,7 @@ class EvolutionService {
         phone.phone_number,
         messageData.to,
         'text',
-        messageData.content,
+        messageData.message || messageData.content,
         'sent'
       ]);
       const message = messageResult.rows[0];
@@ -416,6 +631,89 @@ class EvolutionService {
       };
     } catch (error) {
       logger.error('Failed to send message:', {
+        error: error.message,
+        response: error.response?.data
+      });
+      
+      return {
+        success: false,
+        message: error.response?.data?.message || error.message
+      };
+    }
+  }
+
+  // Send group message through ChatFlow
+  async sendGroupMessage(phoneId, messageData) {
+    try {
+      const phoneQuery = 'SELECT * FROM phone_numbers WHERE id = $1';
+      const phoneResult = await db.query(phoneQuery, [phoneId]);
+      const phone = phoneResult.rows[0];
+
+      if (!phone) {
+        throw new Error('Phone not found');
+      }
+
+      if (!phone.is_connected) {
+        throw new Error('Phone is not connected to WhatsApp');
+      }
+
+      const evolutionInstance = phone.evolution_name || 'chatflow-1';
+      const instanceConfig = this.getInstanceConfig(evolutionInstance);
+
+      // Use POST /send endpoint with device_id query parameter
+      const response = await axios.post(
+        `${instanceConfig.url}/send?device_id=${phone.device_name}`,
+        {
+          group: messageData.group,
+          message: messageData.text
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${instanceConfig.apiKey}`,
+            'apikey': instanceConfig.apiKey
+          },
+          timeout: 30000
+        }
+      );
+
+      // Store message in database
+      const messageQuery = `
+        INSERT INTO messages (phone_number_id, message_id, from_number, to_number, message_type, content, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING *
+      `;
+      
+      const messageResult = await db.query(messageQuery, [
+        phoneId,
+        response.data.results?.message_id || 'msg_' + Date.now(),
+        phone.phone_number,
+        messageData.group,
+        'text',
+        messageData.text,
+        'sent'
+      ]);
+      const message = messageResult.rows[0];
+
+      logger.info('Group message sent successfully:', {
+        messageId: message.id,
+        to: messageData.group,
+        phoneId
+      });
+
+      return {
+        success: true,
+        message: {
+          id: message.id,
+          from: phone.phone_number,
+          to: messageData.group,
+          content: messageData.text,
+          status: 'sent',
+          createdAt: message.created_at
+        }
+      };
+    } catch (error) {
+      logger.error('Failed to send group message:', {
         error: error.message,
         response: error.response?.data
       });
@@ -579,12 +877,23 @@ class EvolutionService {
             deviceName: phone.device_name,
             isConnected: isConnected
           });
+          
+          // Emit real-time status update via WebSocket
+          if (global.emitPhoneStatusUpdate) {
+            global.emitPhoneStatusUpdate(phone.id, isConnected, phone.user_id);
+          }
         }
       }
 
       // Handle incoming messages
       if (webhookData.event === 'message.received' || webhookData.code === 'MESSAGE_RECEIVED') {
         const deviceId = webhookData.device_id || webhookData.device;
+        
+        logger.info('EvolutionService: Processing message.received webhook', {
+          deviceId,
+          from: webhookData.results?.from || webhookData.data?.from,
+          message: webhookData.results?.message || webhookData.data?.message
+        });
         
         // Find phone by device name
         const phoneQuery = 'SELECT * FROM phone_numbers WHERE device_name = $1 LIMIT 1';
@@ -594,7 +903,7 @@ class EvolutionService {
         if (phone) {
           const messageData = webhookData.results || webhookData.data;
           
-          logger.info('Found phone for webhook:', { phoneId: phone.id, deviceName: phone.device_name });
+          logger.info('EvolutionService: Found phone for webhook:', { phoneId: phone.id, deviceName: phone.device_name });
           
           // Store incoming message
           const messageQuery = `
@@ -618,6 +927,44 @@ class EvolutionService {
             from: messageData.from || messageData.sender,
             to: phone.phone_number
           });
+
+          // Process auto-reply for incoming message
+          try {
+            logger.info('Processing auto-reply for message:', {
+              from: messageData.from || messageData.sender,
+              message: messageData.message || messageData.text || ''
+            });
+
+            const autoReply = await autoReplyService.processMessage(
+              messageData.from || messageData.sender,
+              messageData.message || messageData.text || ''
+            );
+
+            logger.info('Auto-reply result:', {
+              shouldReply: autoReply.shouldReply,
+              response: autoReply.response ? 'present' : 'absent',
+              error: autoReply.error || 'none'
+            });
+
+            if (autoReply.shouldReply) {
+              // Send auto-reply response
+              await this.sendMessage(
+                phone.id,
+                {
+                  to: messageData.from || messageData.sender,
+                  message: autoReply.response
+                }
+              );
+
+              logger.info('Auto-reply sent:', {
+                to: messageData.from || messageData.sender,
+                from: phone.phone_number,
+                sessionId: autoReply.sessionId
+              });
+            }
+          } catch (autoReplyError) {
+            logger.error('Auto-reply processing error:', autoReplyError);
+          }
         } else {
           logger.warn('No phone found for webhook device:', deviceId);
         }

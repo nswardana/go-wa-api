@@ -21,6 +21,7 @@ import {
   CircularProgress,
   Tabs,
   Tab,
+  Badge,
 } from '@mui/material';
 import {
   Send,
@@ -50,6 +51,13 @@ const Messages = () => {
   useEffect(() => {
     fetchMessages();
     fetchPhones();
+    
+    // Set up real-time updates
+    const interval = setInterval(() => {
+      fetchMessages();
+    }, 5000); // Refresh every 5 seconds
+    
+    return () => clearInterval(interval);
   }, []);
 
   const fetchMessages = async () => {
@@ -92,11 +100,34 @@ const Messages = () => {
     }
   };
 
+  const getMessageCount = (status) => {
+    return messages.filter(msg => msg.status === status).length;
+  };
+
+  const getFilteredMessages = () => {
+    // Add direction to messages
+    const messagesWithDirection = messages.map(msg => ({
+      ...msg,
+      direction: msg.status === 'sent' ? 'outbound' : 'inbound',
+      display_name: msg.status === 'sent' ? `To: ${msg.to_number}` : `From: ${msg.from_number}`
+    }));
+
+    switch (tabValue) {
+      case 1: // Sent
+        return messagesWithDirection.filter(msg => msg.status === 'sent');
+      case 2: // Received
+        return messagesWithDirection.filter(msg => msg.status === 'received');
+      case 3: // Failed
+        return messagesWithDirection.filter(msg => msg.status === 'failed');
+      default:
+        return messagesWithDirection;
+    }
+  };
+
   const columns = [
     { field: 'id', headerName: 'ID', width: 80 },
-    { field: 'from', headerName: 'From', width: 150 },
-    { field: 'to', headerName: 'To', width: 150 },
-    { field: 'message', headerName: 'Message', width: 300 },
+    { field: 'display_name', headerName: 'From/To', width: 150 },
+    { field: 'content', headerName: 'Message', width: 300 },
     {
       field: 'status',
       headerName: 'Status',
@@ -125,7 +156,7 @@ const Messages = () => {
         />
       ),
     },
-    { field: 'created_at', headerName: 'Created At', width: 180 },
+    { field: 'created_at', headerName: 'Time', width: 180 },
   ];
 
   if (loading) {
@@ -152,9 +183,30 @@ const Messages = () => {
       <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
         <Tabs value={tabValue} onChange={(e, newValue) => setTabValue(newValue)}>
           <Tab label="All Messages" />
-          <Tab label="Sent" />
-          <Tab label="Received" />
-          <Tab label="Failed" />
+          <Tab 
+            label={
+              <Box display="flex" alignItems="center">
+                Sent
+                <Badge badgeContent={getMessageCount('sent')} color="primary" sx={{ ml: 1 }} />
+              </Box>
+            } 
+          />
+          <Tab 
+            label={
+              <Box display="flex" alignItems="center">
+                Received
+                <Badge badgeContent={getMessageCount('received')} color="secondary" sx={{ ml: 1 }} />
+              </Box>
+            } 
+          />
+          <Tab 
+            label={
+              <Box display="flex" alignItems="center">
+                Failed
+                <Badge badgeContent={getMessageCount('failed')} color="error" sx={{ ml: 1 }} />
+              </Box>
+            } 
+          />
         </Tabs>
       </Box>
 
@@ -162,7 +214,11 @@ const Messages = () => {
       {success && <Alert severity="success" sx={{ mb: 2 }}>{success}</Alert>}
 
       <Paper sx={{ height: 400, width: '100%' }}>
-        <DataGrid rows={messages} columns={columns} pageSize={10} />
+        <DataGrid 
+          rows={getFilteredMessages()} 
+          columns={columns} 
+          pageSize={10} 
+        />
       </Paper>
 
       <Dialog open={sendDialogOpen} onClose={() => setSendDialogOpen(false)} maxWidth="sm" fullWidth>

@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 // PostgreSQL configuration
 const isDevelopment = process.env.NODE_ENV === 'development';
 const pool = new Pool({
-  host: isDevelopment ? 'localhost' : process.env.DB_HOST || 'localhost', // Local dev vs Docker
+  host: isDevelopment ? 'localhost' : (process.env.DB_HOST || 'chatflow-postgres'), // Development: localhost, Production: service name
   port: process.env.DB_PORT || 5432,
   database: process.env.DB_NAME || 'chatflow_api',
   user: process.env.DB_USER || 'chatflow_user',
@@ -27,13 +27,14 @@ pool.on('error', (err) => {
 // Redis configuration
 const redisClient = Redis.createClient({
   socket: {
-    host: isDevelopment ? 'localhost' : process.env.REDIS_HOST || 'localhost', // Local dev vs Docker
+    host: isDevelopment ? 'localhost' : (process.env.REDIS_HOST || 'chatflow-redis'), // Development: localhost, Production: service name
     port: process.env.REDIS_PORT || 6379,
     family: 4 // Force IPv4
   },
   database: 0
 });
 
+// Handle connection events
 redisClient.on('connect', () => {
   logger.info('Connected to Redis');
 });
@@ -41,6 +42,20 @@ redisClient.on('connect', () => {
 redisClient.on('error', (err) => {
   logger.error('Redis connection error:', err);
 });
+
+redisClient.on('end', () => {
+  logger.info('Redis connection ended');
+});
+
+// Graceful shutdown
+const closeRedis = async () => {
+  if (redisClient.isOpen) {
+    await redisClient.quit();
+  }
+};
+
+process.on('SIGINT', closeRedis);
+process.on('SIGTERM', closeRedis);
 
 // Connect to Redis
 redisClient.connect().catch(err => {

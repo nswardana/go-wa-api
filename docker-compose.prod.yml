@@ -1,0 +1,113 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: chatflow-postgres
+    environment:
+      POSTGRES_DB: chatflow_api
+      POSTGRES_USER: chatflow_user
+      POSTGRES_PASSWORD: chatflow_password
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init-complete.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./database/backups:/backups:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - chatflow-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatflow_user -d chatflow_api"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: chatflow-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - chatflow-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: chatflow-backend
+    environment:
+      NODE_ENV: production
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: chatflow_api
+      DB_USER: chatflow_user
+      DB_PASSWORD: chatflow_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: your-production-jwt-secret-here
+      PORT: 8090
+    ports:
+      - "8090:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - chatflow-network
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: chatflow-frontend
+    environment:
+      REACT_APP_API_URL: http://localhost:8090/api
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - chatflow-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  chatflow-network:
+    driver: bridge
+
+# Production deployment notes:
+# 1. Update JWT_SECRET with a secure random string
+# 2. Set up proper SSL certificates
+# 3. Configure firewall rules
+# 4. Set up monitoring and logging
+# 5. Configure backup strategy
+# 6. Review resource limits and scaling

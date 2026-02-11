@@ -1,0 +1,567 @@
+const { db } = require('../config/database');
+const logger = require('../utils/logger');
+const { broadcastQueue } = require('../services/queueService');
+
+class BroadcastController {
+  // Get all broadcasts
+  async getBroadcasts(req, res) {
+    try {
+      const { page = 1, limit = 25, status } = req.query;
+      const userId = req.user.id;
+      const offset = (page - 1) * limit;
+
+      let query = `
+        SELECT b.*, 
+               COUNT(bm.id) as message_count,
+               SUM(CASE WHEN bm.status = 'sent' THEN 1 ELSE 0 END) as sent_count,
+               SUM(CASE WHEN bm.status = 'failed' THEN 1 ELSE 0 END) as failed_count
+        FROM broadcasts b
+        LEFT JOIN broadcast_messages bm ON b.id = bm.broadcast_id
+        WHERE b.user_id = $1
+      `;
+      
+      let params = [userId];
+      
+      if (status) {
+        query += ` AND b.status = $2`;
+        params.push(status);
+      }
+      
+      query += ` GROUP BY b.id ORDER BY b.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+      params.push(limit, offset);
+
+      const result = await db.query(query, params);
+      
+      // Get total count
+      const countQuery = status 
+        ? `SELECT COUNT(*) as total FROM broadcasts WHERE user_id = $1 AND status = $2`
+        : `SELECT COUNT(*) as total FROM broadcasts WHERE user_id = $1`;
+      
+      const countParams = status ? [userId, status] : [userId];
+      const countResult = await db.query(countQuery, countParams);
+
+      res.json({
+        success: true,
+        broadcasts: result.rows,
+        total: parseInt(countResult.rows[0].total),
+        page: parseInt(page),
+        limit: parseInt(limit)
+      });
+    } catch (error) {
+      logger.error('Get broadcasts error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  // Get single broadcast
+  async getBroadcast(req, res) {
+    try {
+      const { id } = req.params;
+      const userId = req.user.id;
+
+      const result = await db.query(`
+        SELECT b.*, 
+               COUNT(bm.id) as message_count,
+               SUM(CASE WHEN bm.status = 'sent' THEN 1 ELSE 0 END) as sent_count,
+               SUM(CASE WHEN bm.status = 'failed' THEN 1 ELSE 0 END) as failed_count,
+               bp.progress_percentage,
+               bp.processed_contacts,
+               bp.estimated_completion
+        FROM broadcasts b
+        LEFT JOIN broadcast_messages bm ON b.id = bm.broadcast_id
+        LEFT JOIN broadcast_progress bp ON b.id = bp.broadcast_id
+        WHERE b.id = $1 AND b.user_id = $2
+        GROUP BY b.id, bp.progress_percentage, bp.processed_contacts, bp.estimated_completion
+      `, [id, userId]);
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'Broadcast not found'
+        });
+      }
+
+      res.json({
+        success: true,
+        broadcast: result.rows[0]
+      });
+    } catch (error) {
+      logger.error('Get broadcast error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  // Create new broadcast
+  async createBroadcast(req, res) {
+    try {
+      const { name, description, message, template_id, contact_filter, scheduled_at } = req.body;
+      const userId = req.user.id;
+
+      const result = await db.query(`
+        INSERT INTO broadcasts (user_id, name, description, message, template_id, contact_filter, scheduled_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING *
+      `, [userId, name, description, message, template_id || null, contact_filter || {}, scheduled_at || null]);
+
+      res.json({
+        success: true,
+        broadcast: result.rows[0]
+      });
+    } catch (error) {
+      logger.error('Create broadcast error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  // Update broadcast
+  async updateBroadcast(req, res) {
+    try {
+      const { id } = req.params;
+      const { name, description, message, template_id, contact_filter, scheduled_at } = req.body;
+      const userId = req.user.id;
+
+      const result = await db.query(`
+        UPDATE broadcasts 
+        SET name = $1, description = $2, message = $3, template_id = $4, contact_filter = $5, scheduled_at = $6, updated_at = NOW()
+        WHERE id = $7 AND user_id = $8
+        RETURNING *
+      `, [name, description, message, template_id || null, contact_filter || {}, scheduled_at || null, id, userId]);
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'Broadcast not found'
+        });
+      }
+
+      res.json({
+        success: true,
+        broadcast: result.rows[0]
+      });
+    } catch (error) {
+      logger.error('Update broadcast error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  // Delete broadcast
+  async deleteBroadcast(req, res) {
+    try {
+      const { id } = req.params;
+      const userId = req.user.id;
+
+      await db.query('BEGIN');
+
+      // Delete related messages
+      await db.query(`DELETE FROM broadcast_messages WHERE broadcast_id = $1`, [id]);
+      
+      // Delete progress
+      await db.query(`DELETE FROM broadcast_progress WHERE broadcast_id = $1`, [id]);
+      
+      // Delete broadcast
+      const result = await db.query(`
+        DELETE FROM broadcasts WHERE id = $1 AND user_id = $2
+      `, [id, userId]);
+
+      await db.query('COMMIT');
+
+      if (result.rowCount === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'Broadcast not found'
+        });
+      }
+
+      res.json({
+        success: true,
+        message: 'Broadcast deleted successfully'
+      });
+    } catch (error) {
+      await db.query('ROLLBACK');
+      logger.error('Delete broadcast error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  // Start broadcast
+  async startBroadcast(req, res) {
+    try {
+      const { id } = req.params;
+      const userId = req.user.id;
+
+      // Check if broadcast exists and belongs to user
+      const broadcast = await db.query(`
+        SELECT * FROM broadcasts WHERE id = $1 AND user_id = $2
+      `, [id, userId]);
+
+      if (broadcast.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'Broadcast not found'
+        });
+      }
+
+      const broadcastData = broadcast.rows[0];
+
+      // Get recipients based on contact filter
+      let recipientsQuery = `
+        SELECT id, name, phone, email 
+        FROM contacts 
+        WHERE user_id = $1
+      `;
+      let recipientsParams = [userId];
+
+      // Apply contact filter if exists
+      if (broadcastData.contact_filter && Object.keys(broadcastData.contact_filter).length > 0) {
+        const filter = broadcastData.contact_filter;
+        
+        if (filter.categories && filter.categories.length > 0) {
+          recipientsQuery += ` AND categories && $${recipientsParams.length + 1}`;
+          recipientsParams.push(filter.categories);
+        }
+        
+        if (filter.search) {
+          recipientsQuery += ` AND (name ILIKE $${recipientsParams.length + 1} OR phone ILIKE $${recipientsParams.length + 1} OR email ILIKE $${recipientsParams.length + 1})`;
+          recipientsParams.push(`%${filter.search}%`);
+        }
+      }
+
+      const recipientsResult = await db.query(recipientsQuery, recipientsParams);
+
+      // Get sender phones
+      const sendersResult = await db.query(`
+        SELECT phone_number FROM phone_numbers 
+        WHERE user_id = $1 AND is_connected = true
+      `, [userId]);
+
+      const senderPhones = sendersResult.rows.map(row => row.phone_number);
+
+      if (senderPhones.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No active sender phones available'
+        });
+      }
+
+      if (recipientsResult.rows.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No recipients found for this broadcast'
+        });
+      }
+
+      // Update broadcast status
+      await db.query(`
+        UPDATE broadcasts 
+        SET status = 'running', started_at = NOW(), updated_at = NOW(), total_contacts = $2
+        WHERE id = $1
+      `, [id, recipientsResult.rows.length]);
+
+      // Add job to Bull Queue
+      const job = await broadcastQueue.add('send-broadcast', {
+        broadcastId: parseInt(id),
+        recipients: recipientsResult.rows,
+        message: broadcastData.message,
+        senderPhones: senderPhones
+      }, {
+        attempts: 3,
+        backoff: {
+          type: 'exponential',
+          delay: 2000
+        }
+      });
+
+      logger.info(`Broadcast job added to queue`, {
+        jobId: job.id,
+        broadcastId: id,
+        recipientCount: recipientsResult.rows.length,
+        senderCount: senderPhones.length
+      });
+
+      res.json({
+        success: true,
+        message: 'Broadcast started successfully',
+        jobId: job.id,
+        recipientCount: recipientsResult.rows.length
+      });
+    } catch (error) {
+      logger.error('Start broadcast error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  // Pause broadcast
+  async pauseBroadcast(req, res) {
+    try {
+      const { id } = req.params;
+      const userId = req.user.id;
+
+      const result = await db.query(`
+        UPDATE broadcasts 
+        SET status = 'paused', updated_at = NOW()
+        WHERE id = $1 AND user_id = $2
+      `, [id, userId]);
+
+      if (result.rowCount === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'Broadcast not found'
+        });
+      }
+
+      // Add pause job to queue
+      await addBroadcastJob(id, 'pause');
+
+      res.json({
+        success: true,
+        message: 'Broadcast paused successfully'
+      });
+    } catch (error) {
+      logger.error('Pause broadcast error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  // Stop broadcast
+  async stopBroadcast(req, res) {
+    try {
+      const { id } = req.params;
+      const userId = req.user.id;
+
+      const result = await db.query(`
+        UPDATE broadcasts 
+        SET status = 'stopped', completed_at = NOW(), updated_at = NOW()
+        WHERE id = $1 AND user_id = $2
+      `, [id, userId]);
+
+      if (result.rowCount === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'Broadcast not found'
+        });
+      }
+
+      // Add stop job to queue
+      await addBroadcastJob(id, 'stop');
+
+      res.json({
+        success: true,
+        message: 'Broadcast stopped successfully'
+      });
+    } catch (error) {
+      logger.error('Stop broadcast error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  // Get broadcast progress
+  async getBroadcastProgress(req, res) {
+    try {
+      const { id } = req.params;
+      const userId = req.user.id;
+
+      const result = await db.query(`
+        SELECT bp.*, 
+               b.total_contacts,
+               b.sent_count,
+               b.failed_count,
+               b.status
+        FROM broadcast_progress bp
+        JOIN broadcasts b ON bp.broadcast_id = b.id
+        WHERE bp.broadcast_id = $1 AND b.user_id = $2
+      `, [id, userId]);
+
+      if (result.rows.length === 0) {
+        return res.json({
+          success: true,
+          progress: {
+            total_contacts: 0,
+            processed_contacts: 0,
+            sent_messages: 0,
+            failed_messages: 0,
+            progress_percentage: 0,
+            status: 'draft'
+          }
+        });
+      }
+
+      res.json({
+        success: true,
+        progress: result.rows[0]
+      });
+    } catch (error) {
+      logger.error('Get broadcast progress error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  // Get broadcast messages
+  async getBroadcastMessages(req, res) {
+    try {
+      const { id } = req.params;
+      const { page = 1, limit = 25, status } = req.query;
+      const userId = req.user.id;
+      const offset = (page - 1) * limit;
+
+      // Verify broadcast ownership
+      const broadcast = await db.query(`
+        SELECT id FROM broadcasts WHERE id = $1 AND user_id = $2
+      `, [id, userId]);
+
+      if (broadcast.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'Broadcast not found'
+        });
+      }
+
+      let query = `
+        SELECT bm.*, c.name as contact_name, c.email as contact_email
+        FROM broadcast_messages bm
+        LEFT JOIN contacts c ON bm.contact_id = c.id
+        WHERE bm.broadcast_id = $1
+      `;
+      
+      let params = [id];
+      
+      if (status) {
+        query += ` AND bm.status = $2`;
+        params.push(status);
+      }
+      
+      query += ` ORDER BY bm.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+      params.push(limit, offset);
+
+      const result = await db.query(query, params);
+      
+      // Get total count
+      const countQuery = status 
+        ? `SELECT COUNT(*) as total FROM broadcast_messages WHERE broadcast_id = $1 AND status = $2`
+        : `SELECT COUNT(*) as total FROM broadcast_messages WHERE broadcast_id = $1`;
+      
+      const countParams = status ? [id, status] : [id];
+      const countResult = await db.query(countQuery, countParams);
+
+      res.json({
+        success: true,
+        messages: result.rows,
+        total: parseInt(countResult.rows[0].total),
+        page: parseInt(page),
+        limit: parseInt(limit)
+      });
+    } catch (error) {
+      logger.error('Get broadcast messages error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  // Test broadcast message
+  async testBroadcast(req, res) {
+    try {
+      const { id } = req.params;
+      const { phone, message } = req.body;
+      const userId = req.user.id;
+
+      // Verify broadcast ownership
+      const broadcast = await db.query(`
+        SELECT id FROM broadcasts WHERE id = $1 AND user_id = $2
+      `, [id, userId]);
+
+      if (broadcast.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'Broadcast not found'
+        });
+      }
+
+      // Send test message (will be implemented with Evolution API)
+      // const result = await evolutionService.sendMessage(phone, message);
+
+      res.json({
+        success: true,
+        message: 'Test message sent successfully'
+        // result: result
+      });
+    } catch (error) {
+      logger.error('Test broadcast error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+    }
+
+  // Get queue status
+  async getQueueStatus(req, res) {
+  try {
+    const userId = req.user.id;
+    
+    // Get running broadcasts
+    const runningBroadcasts = await db.query(`
+      SELECT id, name, status, total_contacts, sent_count, failed_count, started_at
+      FROM broadcasts 
+      WHERE user_id = $1 AND status IN ('running', 'paused')
+      ORDER BY started_at DESC
+    `, [userId]);
+    
+    // Get recent completed broadcasts (last 24 hours)
+    const recentBroadcasts = await db.query(`
+      SELECT id, name, status, total_contacts, sent_count, failed_count, started_at, completed_at
+      FROM broadcasts 
+      WHERE user_id = $1 AND status IN ('completed', 'completed_with_errors')
+      AND completed_at >= NOW() - INTERVAL '24 hours'
+      ORDER BY completed_at DESC
+      LIMIT 10
+    `, [userId]);
+    
+    res.json({
+      success: true,
+      data: {
+        running: runningBroadcasts.rows,
+        recent: recentBroadcasts.rows,
+        summary: {
+          runningCount: runningBroadcasts.rows.length,
+          recentCount: recentBroadcasts.rows.length
+        }
+      }
+    });
+  } catch (error) {
+    logger.error('Get queue status error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+}
+
+module.exports = new BroadcastController();

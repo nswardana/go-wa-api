@@ -1,6 +1,17 @@
 import axios from 'axios';
+import io from 'socket.io-client';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8090/api';
+const API_BASE_URL = 'http://localhost:8090/api';
+const WEBSOCKET_URL = 'http://localhost:8090';
+
+// WebSocket client
+export const socket = io(WEBSOCKET_URL, {
+  autoConnect: true,
+  reconnection: true,
+  reconnectionDelay: 1000,
+  reconnectionAttempts: 5,
+  maxReconnectionAttempts: 5
+});
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -44,6 +55,7 @@ export const phonesAPI = {
   deletePhone: (id) => api.delete(`/phones/${id}`),
   generateQR: (id) => api.post(`/phones/${id}/generate-qr`),
   getPhoneStatus: (id) => api.get(`/phones/${id}/status`),
+  disconnectPhone: (id) => api.post(`/phones/${id}/disconnect`),
 };
 
 export const templatesAPI = {
@@ -52,6 +64,26 @@ export const templatesAPI = {
   updateTemplate: (id, data) => api.put(`/templates/${id}`, data),
   deleteTemplate: (id) => api.delete(`/templates/${id}`),
   processTemplate: (id, variables) => api.post(`/templates/${id}/process`, variables)
+};
+
+export const contactsAPI = {
+  getContacts: (params) => api.get('/contacts', { params }),
+  getContact: (id) => api.get(`/contacts/${id}`),
+  createContact: (data) => api.post('/contacts', data),
+  updateContact: (id, data) => api.put(`/contacts/${id}`, data),
+  deleteContact: (id) => api.delete(`/contacts/${id}`),
+  importContacts: (data) => api.post('/contacts/import', data),
+  exportContacts: (params) => api.get('/contacts/export', { params }),
+  bulkDelete: (contactIds) => api.post('/contacts/bulk-delete', { contactIds }),
+  bulkUpdateCategory: (contactIds, categoryId) => api.post('/contacts/bulk-category', { contactIds, categoryId })
+};
+
+export const categoriesAPI = {
+  getCategories: () => api.get('/categories'),
+  getCategory: (id) => api.get(`/categories/${id}`),
+  createCategory: (data) => api.post('/categories', data),
+  updateCategory: (id, data) => api.put(`/categories/${id}`, data),
+  deleteCategory: (id) => api.delete(`/categories/${id}`)
 };
 
 // Get API Keys and Number Keys for current user
@@ -123,6 +155,39 @@ export const statsAPI = {
   getMessageStats: (period) => api.get('/stats/messages', { params: { period } }),
   getPhoneStats: () => api.get('/stats/phones'),
   getWebhookStats: (period) => api.get('/stats/webhooks', { params: { period } }),
+};
+
+export const autoReplyAPI = {
+  getPhoneNumbers: () => api.get('/auto-reply/phone-numbers'),
+  getConfigs: () => api.get('/auto-reply'),
+  getConfig: (id) => api.get(`/auto-reply/${id}`),
+  createConfig: (data) => api.post('/auto-reply', data),
+  updateConfig: (id, data) => api.put(`/auto-reply/${id}`, data),
+  deleteConfig: (id) => api.delete(`/auto-reply/${id}`),
+  testConfig: (id, data) => api.post(`/auto-reply/${id}/test`, data),
+  getAnalytics: (id) => api.get(`/auto-reply/${id}/analytics`)
+};
+
+export const broadcastsAPI = {
+  getBroadcasts: (params) => api.get('/broadcasts', { params }),
+  getBroadcast: (id) => api.get(`/broadcasts/${id}`),
+  createBroadcast: (data) => api.post('/broadcasts', data),
+  updateBroadcast: (id, data) => api.put(`/broadcasts/${id}`, data),
+  deleteBroadcast: (id) => api.delete(`/broadcasts/${id}`),
+  getBroadcastProgress: (id) => api.get(`/broadcasts/${id}/progress`),
+  startBroadcast: (id) => api.post(`/broadcasts/${id}/start`),
+  stopBroadcast: (id) => api.post(`/broadcasts/${id}/stop`),
+  getBroadcastQueue: () => api.get('/broadcasts/queue'),
+  getBroadcastStatus: (id) => api.get(`/broadcasts/${id}/status`),
+  getBroadcastRecipients: (id) => api.get(`/broadcasts/${id}/recipients`)
+};
+
+export const broadcastTemplatesAPI = {
+  getTemplates: () => api.get('/broadcast-templates'),
+  getTemplate: (id) => api.get(`/broadcast-templates/${id}`),
+  createTemplate: (data) => api.post('/broadcast-templates', data),
+  updateTemplate: (id, data) => api.put(`/broadcast-templates/${id}`, data),
+  deleteTemplate: (id) => api.delete(`/broadcast-templates/${id}`)
 };
 
 export const subscriptionAPI = {
