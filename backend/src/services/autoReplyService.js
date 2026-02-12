@@ -74,7 +74,19 @@ class AutoReplyService {
       }
 
       // 4. If has session, process menu selection
+      logger.info('AutoReplyService: Processing menu selection', { 
+        sessionId: session.id, 
+        currentMenuId: session.current_menu_id, 
+        message: message 
+      });
+      
       const menuResponse = await this.handleMenuSelection(session, message);
+      
+      logger.info('AutoReplyService: Menu selection result', {
+        response: menuResponse.response,
+        menuId: menuResponse.menuId,
+        menuPath: menuResponse.menuPath
+      });
       
       // Update session
       await this.updateSession(session.id, menuResponse.menuId);

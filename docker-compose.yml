@@ -34,7 +34,7 @@ services:
     container_name: chatflow-api-1
     restart: always
     ports:
-      - "8081:3000"
+      - "8090:3000"
     environment:
       - WEBHOOK_URL=http://host.docker.internal:8090/webhook/incoming
       - WEBHOOK_SECRET=webhook_secret_123

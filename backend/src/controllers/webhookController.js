@@ -253,9 +253,19 @@ const triggerAutoReply = async (savedMessage, rawPayload) => {
       console.log('Using registered phone for auto-reply:', registeredPhone);
       
       // Call auto-reply service with registered phone number
+      logger.info('WebhookController: Calling auto-reply service', { 
+        phoneNumber: registeredPhone, 
+        message: savedMessage.content,
+        messageId: savedMessage.message_id 
+      });
+      
       const replyResult = await autoReplyService.processMessage(registeredPhone, savedMessage.content);
       
       console.log('Auto-reply result:', replyResult);
+      logger.info('WebhookController: Auto-reply service result', {
+        shouldReply: replyResult.shouldReply,
+        response: replyResult.response
+      });
       
       if (replyResult.shouldReply) {
         console.log('Auto-reply triggered:', replyResult.response);
